@@ -1,0 +1,92 @@
+file:///C:/Users/sammy/OneDrive/Documents/Data607hw2B.html
+library(tidyverse)
+penguin_predictions <- read_csv("penguin_predictions.csv")
+glimpse(penguin_predictions)
+threshold <- 0.5
+
+pp <- penguin_predictions %>%
+  mutate(
+    pred = if_else(.pred_female > threshold, "female", "male")
+  )
+
+mean(pp$pred == pp$.pred_class)
+pp <- pp %>%
+  mutate(
+    outcome = case_when(
+      sex == "female" & pred == "female" ~ "TP",
+      sex == "female" & pred == "male"   ~ "FN",
+      sex == "male"   & pred == "male"   ~ "TN",
+      sex == "male"   & pred == "female" ~ "FP"
+    ),
+    outcome = factor(outcome, levels = c("TP", "FN", "TN", "FP"))
+  )
+
+table(pp$outcome)
+summary_table <- pp %>%
+  group_by(outcome) %>%
+  summarise(
+    n      = n(),
+    mean   = mean(.pred_female),
+    median = median(.pred_female),
+    min    = min(.pred_female),
+    max    = max(.pred_female),
+    .groups = "drop"
+  )
+
+print(summary_table)
+tp_probs <- pp %>% filter(outcome == "TP") %>% pull(.pred_female)
+
+fn_probs <- pp %>% filter(outcome == "FN") %>% pull(.pred_female)
+
+wilcox.test(tp_probs, fn_probs, alternative = "greater")
+tn_probs <- pp %>% filter(outcome == "TN") %>% pull(.pred_female)
+
+fn_probs <- pp %>% filter(outcome == "FN") %>% pull(.pred_female)
+
+wilcox.test(tp_probs, fn_probs, alternative = "greater")
+tn_probs <- pp %>% filter(outcome == "TN") %>% pull(.pred_female)
+
+fp_probs <- pp %>% filter(outcome == "FP") %>% pull(.pred_female)
+
+wilcox.test(tn_probs, fp_probs, alternative = "less")
+pp <- pp %>%
+  mutate(distance_from_boundary = abs(.pred_female - 0.5))
+
+pp %>%
+  group_by(outcome) %>%
+  summarise(
+    mean_distance_from_0.5 = mean(distance_from_boundary),
+    .groups = "drop"
+  )
+pp%>% filter(outcome == "FN") %>%
+  mutate(how_wrong = 0.5 - .pred_female) %>%
+  select(.pred_female, how_wrong)
+pp %>% filter(outcome == "FP") %>%
+  mutate(how_wrong = .pred_female - 0.5) %>%
+  select(.pred_female, how_wrong)
+plot_pp <- pp %>%
+  mutate(
+    outcome_label = case_when(
+      outcome == "TP" ~ "Correct",
+      outcome == "FN" ~ "Missed",
+      outcome == "TN" ~ "Correct",
+      outcome == "FP" ~ "Misclassified"
+    ),
+    sex_label = paste("Actual class:", str_to_upper(sex))
+  )
+
+ggplot(plot_pp, aes(x = outcome_label, y = .pred_female, color = outcome)) +
+  geom_jitter(width = 0.08, size = 3, alpha = 0.8) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray40") +
+  facet_wrap(~ sex_label, scales = "free_x") +
+  scale_color_manual(values = c(TP = "#2b7a3d", FN = "#c0392b",
+                                 TN = "#2b7a3d", FP = "#c0392b")) +
+  labs(
+    title = "Predicted probability (.pred_female) by outcome type",
+    subtitle = "Dashed line = 0.5 decision threshold",
+    x = NULL,
+    y = ".pred_female (predicted probability)",
+    color = "Outcome"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none")
