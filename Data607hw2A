@@ -1,0 +1,46 @@
+file:///C:/Users/sammy/OneDrive/Documents/MasterDataScience/Fall2026Data607/Data607hw2ACode.html
+title: "DATA6072A"
+output: html_document
+date: "2026-09-13"
+---
+## Approach
+Hello Professor, my question for the 2A SQL and R assignment is: Do some raters systematically rate everything higher or lower than others?
+
+## Code Base 
+
+```{r}
+library(tidyverse)
+ratings <- read_csv("SummerMoviesRating - Sheet1.csv")
+
+rater_means <- ratings %>%
+  group_by(Responder) %>%
+  summarise(
+    mean_rating = mean(Rating, na.rm = TRUE),
+    n_movies_rated = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(mean_rating)
+
+print(rater_means)
+
+
+grand_mean <- mean(ratings$Rating, na.rm = TRUE)
+rater_means <- rater_means %>%
+  mutate(deviation = mean_rating - grand_mean)
+
+print(rater_means)
+
+
+ggplot(rater_means, aes(x = reorder(Responder, mean_rating), y = mean_rating)) +
+  geom_col(fill = "steelblue") +
+  geom_hline(yintercept = grand_mean, linetype = "dashed", color = "red") +
+  labs(title = "Average rating given by each rater",
+       subtitle = "Dashed line = overall grand mean (4.03)",
+       x = "Rater", y = "Mean rating given") +
+  coord_flip() +
+  theme_minimal(base_size = 13)
+
+
+anova_result <- aov(Rating ~ factor(Responder), data = ratings)
+summary(anova_result)
+```
