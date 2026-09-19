@@ -1,16 +1,35 @@
 file:///C:/Users/sammy/OneDrive/Documents/DATA6073ACode.html
-Approach
-What are the top three movies we would recommend to each user who hasn’t rated everything?
+
+---
+title: "DATA6073ACODE"
+author: "Esra Dogan,Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+## Approach
+What are the top three movies we would recommend to each user who hasn't rated everything?
+
 Introduction
-In this assignment, we will build a “movie recommender” using the Global Baseline Estimate algorithm. The data comes from a survey where several people rated a set of movies, and most of them did not rate every movie.
+
+In this assignment, we will build a "movie recommender" using the Global Baseline Estimate algorithm. The data comes from a survey where several people rated a set of movies, and most of them did not rate every movie.
+
 Planned Approach
+
 First we will read the movie ratings spreadsheet into R. The data has one row per user and one column per movie, with missing values where someone did not rate a film. We will reshape it into long format so that each row is one user–movie pair, which makes the calculations easier.
-The idea behind the Global Baseline Estimate is simple. To recommend a movie to someone, we need to guess how much they would like the films they haven’t seen yet, so that we can rank those films and pick the best ones. The algorithm makes that guess by starting from the average rating across the whole survey and then adjusting it twice: once for how generous or harsh that particular user tends to be, and once for how well-liked that particular movie is overall. A user who rates everything highly gets an upward adjustment, and a movie that everyone enjoyed gets an upward adjustment too.
+
+The idea behind the Global Baseline Estimate is simple. To recommend a movie to someone, we need to guess how much they would like the films they haven't seen yet, so that we can rank those films and pick the best ones. The algorithm makes that guess by starting from the average rating across the whole survey and then adjusting it twice: once for how generous or harsh that particular user tends to be, and once for how well-liked that particular movie is overall. A user who rates everything highly gets an upward adjustment, and a movie that everyone enjoyed gets an upward adjustment too.
+
 Anticipated Challenges
+
 Some movies were rated by only a few people, so the numbers for those films may not be reliable.
+
 We also need to be careful with the missing values. If we treat unrated movies as zeros instead of missing, the averages will come out wrong.
-Finally, this method is not personalized, since it never looks at what kind of movies a person enjoys. We expect the users’ top three lists to look similar, and we want to discuss that in our conclusion.
-Code
+
+Finally, this method is not personalized, since it never looks at what kind of movies a person enjoys. We expect the users' top three lists to look similar, and we want to discuss that in our conclusion.
+
+
+## Code Base
+```{r}
 library(readr)
 SummerMoviesRating <- read_csv("SummerMoviesRating.csv")
 View(SummerMoviesRating)
@@ -130,3 +149,4 @@ ggplot(recommendation_table,
 ```
 
 ## So to answer our questions the three movie we would recommand are Toy Story 5, Oppenheimer and Michael
+
