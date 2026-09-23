@@ -1,0 +1,14 @@
+---
+title: "DATA607Project1"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+## Approach
+Approach: First, I separated the player data into two line parts (name/points/rounds and state/rating). Then, using regular expressions, I extracted the pre-tournament rating, without continuing beyond the post-tournament or provisional ratings (denoted with the "P"). For each player, I identified their opponent pair numbers based on the rounds they were part of and created a lookup table (pair number to pre-rating), to find the average pre-tournament rating of all their opponents. To validate the entire pipeline, I verified its result against the one example given (Gary Hua: ON, 6.0, 1794, 1605).
+
+Challenges that could arise: Since the rating column in the records was not consistently formatted, extracting the pre-tournament rating (without continuing beyond the post- and provisional ratings) was tricky with regexes. Also, bye, forfeited and non-played rounds (H, U, X, B) had no opponent number associated with them; therefore, they needed to be explicitly filtered out. Without the one example provided in the assignment, it would be hard to test whether my algorithm worked before running it for all 64 players.
+
+```{r}
+```
+
