@@ -1,0 +1,156 @@
+---
+title: "DATA607ProjectCode"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+## Approach
+Approach: First, I separated the player data into two line parts (name/points/rounds and state/rating). Then, using regular expressions, I extracted the pre-tournament rating, without continuing beyond the post-tournament or provisional ratings (denoted with the "P"). For each player, I identified their opponent pair numbers based on the rounds they were part of and created a lookup table (pair number to pre-rating), to find the average pre-tournament rating of all their opponents. To validate the entire pipeline, I verified its result against the one example given (Gary Hua: ON, 6.0, 1794, 1605).
+
+Challenges that could arise: Since the rating column in the records was not consistently formatted, extracting the pre-tournament rating (without continuing beyond the post- and provisional ratings) was tricky with regexes. Also, bye, forfeited and non-played rounds (H, U, X, B) had no opponent number associated with them; therefore, they needed to be explicitly filtered out. Without the one example provided in the assignment, it would be hard to test whether my algorithm worked before running it for all 64 players.
+
+## Step by Step approach
+
+## Step 1: Read the data
+
+```{r}
+lines <- readLines("tournamentinfo.txt")
+```
+
+## Step 2: Strip out separators and header rows
+
+```{r}
+# Remove the dashed separator lines
+lines <- lines[!grepl("^-+$", lines)]
+
+# Remove the two header rows
+lines <- lines[!grepl("Pair \\| Player Name|Num  \\| USCF ID", lines)]
+
+# From here on, lines alternate: name/points/rounds line, then state/rating line
+stopifnot(length(lines) %% 2 == 0)
+
+name_lines  <- lines[seq(1, length(lines), 2)]
+state_lines <- lines[seq(2, length(lines), 2)]
+```
+
+## Step 3: Parsing functions
+
+Each player's two lines are pipe-delimited. We split on `|` and pull out the
+fields we need. Round results look like `W 39`, `L 8`, `D 12` (result +
+opponent pair number), or `H`, `U`, `X`, `B` for byes/forfeits/unplayed games
+with no opponent - those are dropped automatically since they contain no
+digits.
+
+```{r}
+parse_name_line <- function(l) {
+  fields <- strsplit(l, "\\|")[[1]]
+  pair_num <- as.integer(trimws(fields[1]))
+  name     <- trimws(fields[2])
+  pts      <- as.numeric(trimws(fields[3]))
+
+  # Round result fields: extract digits only (opponent pair numbers).
+  # Byes/forfeits (H, U, X, B with no number) yield "" -> NA -> filtered out.
+  round_fields <- fields[4:length(fields)]
+  opp_ids <- suppressWarnings(as.integer(gsub("[^0-9]", "", round_fields)))
+  opp_ids <- opp_ids[!is.na(opp_ids)]
+
+  list(pair_num = pair_num, name = name, pts = pts, opp_ids = opp_ids)
+}
+
+parse_state_line <- function(l) {
+  fields <- strsplit(l, "\\|")[[1]]
+  state <- trimws(fields[1])
+
+  # Pre-rating is the number right after "R:" - regex stops at the first
+  # non-digit, so it correctly ignores provisional-rating suffixes like
+  # "1641P17->1657P24".
+  rtg_field  <- fields[2]
+  pre_rating <- as.integer(sub(".*R:\\s*([0-9]+).*", "\\1", rtg_field))
+
+  list(state = state, pre_rating = pre_rating)
+}
+```
+
+
+## Step 4: Parse every player
+
+```{r}
+players <- lapply(seq_along(name_lines), function(i) {
+  n <- parse_name_line(name_lines[i])
+  s <- parse_state_line(state_lines[i])
+  c(n, s)
+})
+```
+
+
+## Step 5: Build a lookup table (pair number -> pre-rating)
+
+This is the key step that lets us look up each opponent's *pre-tournament*
+rating, the same way Gary Hua's opponents' ratings had to be looked up
+individually rather than read off his own row.
+
+```{r}
+rating_lookup <- setNames(
+  sapply(players, function(p) p$pre_rating),
+  sapply(players, function(p) p$pair_num)
+)
+```
+
+
+## Step 6: Compute average opponent pre-rating and assemble final table
+
+```{r}
+result <- do.call(rbind, lapply(players, function(p) {
+  opp_ratings <- rating_lookup[as.character(p$opp_ids)]
+  avg_opp <- round(mean(opp_ratings, na.rm = TRUE))
+
+  data.frame(
+    Player_Name             = p$name,
+    State                   = p$state,
+    Total_Points            = p$pts,
+    Pre_Rating              = p$pre_rating,
+    Avg_Opponent_Pre_Rating = avg_opp,
+    stringsAsFactors = FALSE
+  )
+}))
+```
+
+
+## Step 7: Validation check
+
+Though this assigment gives us a known-correct answer for the first player, we can check if the pipline is working correctly before trusting the remaining output
+
+```{r}
+result[1, ]
+```
+
+Expected: **Gary Hua, ON, 6.0, 1794, 1605**
+
+## Step 8: Preview full results
+
+```{r}
+head(result, 10)
+```
+
+
+## Step 9: Write to CSV
+
+```{r}
+write.csv(result, "tournament_results.csv", row.names = FALSE)
+```
+
+## Conclusion
+
+This project showed that most of the work in data acquisition happens before analysis—the hard part was converting messy, human-readable text into a clean, structured data set, not doing the final calculation. Found it useful to build and test against a single known-correct example (Gary Hua) rather than waiting to find parsing errors after processing the entire data set. Overall, the exercise showed that a few well-crafted regex rules and a simple lookup table can convert raw text into a form useful for a SQL database or further analysis.
+
+## Citation
+Anthropic. (2026). Claude (Sonnet 5) [Large language model]. https://claude.ai
+
+I ask Claude (Anthropic) to help design the text-parsing logic to separate the tournament records into player blocks, including code to strip out separator/header lines and split the alternating record lines. I reviewed, tested, and understood all code before including it in this submission. I have done similar things in Java but not in R.
+
+
+
+
+
+
+
