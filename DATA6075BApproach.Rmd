@@ -1,0 +1,16 @@
+---
+title: "DATA6075BApproach"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r }
+
+```
+
+## Approach
+
+Approach: Building on my Project 1 parsing, I calculated each player's expected score by applying the Elo formula (E = 1 / (1 + 10^((R_opponent − R_player)/400))) to each individual game and summing these per-game values into a tournament total. I then compared each player's actual score to this expected score to find the performance differential. I sorted the results to identify the top five overperformers and underperformers. I used the standard Elo formula as published by Arpad Elo, with citation included as required.
+
+Potential challenges: Calculate the expected score per game and sum it afterward, since averaging opponent ratings first and applying Elo once would produce an incorrect result due to the formula's nonlinearity. Exclude byes and unplayed rounds consistently from both actual and expected scores, or they will distort the performance differential. Since different sources implement Elo slightly differently, clearly cite the exact formula used in case results vary from a classmate's.
