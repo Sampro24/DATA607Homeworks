@@ -1,0 +1,16 @@
+---
+title: "DATA6075AApproach"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+
+```
+
+## Approach
+
+Does AM West's better overall delay rate reflect truly better performance, or does Alaska's lower delay rate in every city reveal that flight mix (Phoenix vs. Seattle) is misleading the overall comparison?
+
+Potential challenges: The main challenges are getting the data in cleanly: commas in numbers like 1,841 need quoting, and you must keep the blank cells and separator row in the CSV, then remove that empty row before using fill(airline) so it doesn't become a bogus record. During analysis, the biggest pitfall is averaging city percentages instead of dividing total delays by total flights, and you'll also need to show each airline's flight share by city to explain the reversal. Finally, make sure your R Markdown knits from a clean session (reading from the raw GitHub URL, not a local path) and includes written narrative after each table and chart, since the rubric grades your explanations as well as your code.
