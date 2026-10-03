@@ -1,0 +1,177 @@
+---
+title: "DATA6075BCode"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Approach
+
+Approach: Building on my Project 1 parsing, I calculated each player's expected score by applying the Elo formula (E = 1 / (1 + 10^((R_opponent − R_player)/400))) to each individual game and summing these per-game values into a tournament total. I then compared each player's actual score to this expected score to find the performance differential. I sorted the results to identify the top five overperformers and underperformers. I used the standard Elo formula as published by Arpad Elo, with citation included as required.
+
+Potential challenges: Calculate the expected score per game and sum it afterward, since averaging opponent ratings first and applying Elo once would produce an incorrect result due to the formula's nonlinearity. Exclude byes and unplayed rounds consistently from both actual and expected scores, or they will distort the performance differential. Since different sources implement Elo slightly differently, clearly cite the exact formula used in case results vary from a classmate's.
+
+## Step 1: Read and clean the data
+
+```{r}
+lines <- readLines("tournamentinfo.txt")
+lines <- lines[!grepl("^-+$", lines)]
+lines <- lines[!grepl("Pair \\| Player Name|Num  \\| USCF ID", lines)]
+stopifnot(length(lines) %% 2 == 0)
+
+name_lines  <- lines[seq(1, length(lines), 2)]
+state_lines <- lines[seq(2, length(lines), 2)]
+```
+
+## Step 2: Parsing functions
+
+This builds on the Project 1 parser, but now also captures the **result
+letter** (W/L/D) for each round, not just the opponent ID, so we know which
+games were actually played (excluding byes/forfeits: H, U, X, B).
+
+```{r}
+parse_name_line <- function(l) {
+  fields <- strsplit(l, "\\|")[[1]]
+  pair_num <- as.integer(trimws(fields[1]))
+  name     <- trimws(fields[2])
+  pts      <- as.numeric(trimws(fields[3]))
+  round_fields <- trimws(fields[4:length(fields)])
+
+  # Each round field looks like "W 39", "L 8", "D 12", or "H"/"U"/"X"/"B"
+  results <- sapply(round_fields, function(rf) {
+    m <- regmatches(rf, regexec("^([WLDHUXB])\\s*([0-9]*)$", rf))[[1]]
+    if (length(m) == 0) return(c(result = NA, opp = NA))
+    c(result = m[2], opp = m[3])
+  })
+
+  results_df <- as.data.frame(t(results), stringsAsFactors = FALSE)
+  results_df$opp <- suppressWarnings(as.integer(results_df$opp))
+
+  # Keep only rows that are actual games (numeric opponent + W/L/D result)
+  games <- results_df[!is.na(results_df$opp) & results_df$result %in% c("W", "L", "D"), ]
+
+  list(pair_num = pair_num, name = name, pts = pts, games = games)
+}
+
+parse_state_line <- function(l) {
+  fields <- strsplit(l, "\\|")[[1]]
+  state <- trimws(fields[1])
+  rtg_field  <- fields[2]
+  pre_rating <- as.integer(sub(".*R:\\s*([0-9]+).*", "\\1", rtg_field))
+  list(state = state, pre_rating = pre_rating)
+}
+```
+
+## Step 3: Parse all players and build a rating lookup
+
+```{r}
+players <- lapply(seq_along(name_lines), function(i) {
+  n <- parse_name_line(name_lines[i])
+  s <- parse_state_line(state_lines[i])
+  c(n, s)
+})
+
+rating_lookup <- setNames(
+  sapply(players, function(p) p$pre_rating),
+  sapply(players, function(p) p$pair_num)
+)
+```
+
+## Step 4: Elo expected score function
+
+```{r}
+elo_expected <- function(player_rating, opp_rating) {
+  1 / (1 + 10^((opp_rating - player_rating) / 400))
+}
+```
+
+## Step 5: Compute expected score, actual score, and the difference
+
+```{r}
+TR <- do.call(rbind, lapply(players, function(p) {
+  g <- p$games
+  opp_ratings <- rating_lookup[as.character(g$opp)]
+  exp_scores <- elo_expected(p$pre_rating, opp_ratings)
+  total_expected <- sum(exp_scores, na.rm = TRUE)
+  diff <- p$pts - total_expected
+
+  data.frame(
+    Player_Name    = p$name,
+    State          = p$state,
+    Pre_Rating     = p$pre_rating,
+    Games_Played   = nrow(g),
+    Actual_Score   = p$pts,
+    Expected_Score = round(total_expected, 2),
+    Difference     = round(diff, 2),
+    stringsAsFactors = FALSE
+  )
+}))
+```
+
+## Step 6: Display the full dataset
+
+```{r}
+knitr::kable(TR)
+```
+
+## Step 7: Top 5 over-performers and under-performers
+
+```{r}
+top_over  <- head(TR[order(-TR$Difference), ], 5)
+top_under <- head(TR[order(TR$Difference), ], 5)
+
+cat("Top 5 Over-performers:\n")
+top_over
+
+cat("\nTop 5 Under-performers:\n")
+top_under
+```
+
+## Graph 1: Actual vs. Expected Score (all players)
+
+Points above the red dashed line (y = x) over-performed relative to their
+rating; points below under-performed.
+
+```{r}
+plot(TR$Expected_Score, TR$Actual_Score,
+     xlab = "Expected Score", ylab = "Actual Score",
+     main = "Actual vs. Expected Score (all players)",
+     pch = 19, col = "steelblue")
+abline(a = 0, b = 1, col = "red", lty = 2)
+```
+
+## Graph 2: Top 5 Over- and Under-performers
+
+```{r}
+combined <- rbind(top_over, top_under)
+combined <- combined[order(combined$Difference), ]
+
+par(mar = c(5, 14, 4, 2))
+barplot(combined$Difference, names.arg = combined$Player_Name, horiz = TRUE, las = 1,
+        col = ifelse(combined$Difference > 0, "forestgreen", "firebrick"),
+        main = "Top 5 Over- and Under-performers (Actual - Expected)",
+        xlab = "Difference from Expected Score")
+abline(v = 0)
+```
+
+## Conclusion
+
+The scatter plot shows that while most players performed reasonably close to
+their Elo-predicted expectation, a handful of players (notably lower-rated
+players like Aditya Bajaj and Anvit Rao) substantially exceeded their
+expected score, while some higher-rated players (like Loren Schwiebert)
+scored well below what their pre-tournament rating predicted. This is
+exactly the kind of signal the Elo system is designed to produce: rating
+changes after the tournament should push over-performers' ratings up and
+under-performers' ratings down.
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,210 @@
+---
+title: "DATA6075ACode"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+## Approach
+
+Does AM West's better overall delay rate reflect truly better performance, or does Alaska's lower delay rate in every city reveal that flight mix (Phoenix vs. Seattle) is misleading the overall comparison?
+
+Potential challenges: The main challenges are getting the data in cleanly: commas in numbers like 1,841 need quoting, and you must keep the blank cells and separator row in the CSV, then remove that empty row before using fill(airline) so it doesn't become a bogus record. During analysis, the biggest pitfall is averaging city percentages instead of dividing total delays by total flights, and you'll also need to show each airline's flight share by city to explain the reversal. Finally, make sure your R Markdown knits from a clean session (reading from the raw GitHub URL, not a local path) and includes written narrative after each table and chart, since the rubric grades your explanations as well as your code.
+
+
+```{r}
+library(tidyverse)   
+library(scales)
+```
+
+## 
+
+```{r}
+csv_url <- "https://raw.githubusercontent.com/Sampro24/DATA607Homeworks/refs/heads/main/AirlineDelays.csv"
+
+raw <- tryCatch(
+  read_csv(csv_url, col_types = cols(.default = col_character())),
+  error = function(e) {
+    message("GitHub URL not reachable, falling back to local file.")
+    read_csv("airline_delays.csv", col_types = cols(.default = col_character()))
+  }
+)
+
+raw
+```
+
+## 2. Tidying and transforming
+
+```{r}
+delays_long <- raw %>%
+  rename(airline = 1, status = 2) %>%
+  filter(!if_all(everything(), is.na)) %>%     # remove the blank separator row
+  fill(airline) %>%                            # populate missing airline names
+  pivot_longer(
+    cols = -c(airline, status),
+    names_to = "city",
+    values_to = "flights"
+  ) %>%
+  mutate(
+    flights = parse_number(flights),           # "1,841" -> 1841
+    status  = str_trim(status)
+  )
+
+delays_long
+```
+
+```{r}
+# sanity checks: no missing values, 2 airlines x 2 statuses x 5 cities = 20 rows
+stopifnot(nrow(delays_long) == 20, !anyNA(delays_long))
+```
+
+For analysis, a "one row per airline and city" layout is easiest, with columns for on-time and delayed counts and the total.
+
+```{r}
+by_city <- delays_long %>%
+  pivot_wider(names_from = status, values_from = flights) %>%
+  rename(on_time = `on time`) %>%
+  mutate(
+    total      = on_time + delayed,
+    delay_rate = delayed / total,
+    ontime_rate = on_time / total
+  )
+
+by_city
+```
+
+## 3. Count analysis
+
+First, plain counts of flights by airline and status.
+
+```{r}
+delays_long %>%
+  group_by(airline, status) %>%
+  summarise(flights = sum(flights), .groups = "drop") %>%
+  pivot_wider(names_from = status, values_from = flights)
+```
+
+```{r}
+ggplot(delays_long, aes(x = city, y = flights, fill = status)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ airline) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Flight counts by city, airline and status",
+       x = NULL, y = "Number of flights", fill = NULL) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+Counts alone are hard to compare. AM West flies about 7,200 flights versus Alaska's roughly 3,800, and the volumes are very uneven across cities (AM West has over 5,000 flights into Phoenix, Alaska over 2,000 into Seattle). That is why percentages are needed.
+
+## 4. Overall comparison (percentages)
+
+Overall delay rate = total delayed flights / total flights. I divide the totals rather than averaging the five city percentages, because averaging percentages would give small cities the same weight as large ones.
+
+```{r}
+overall <- by_city %>%
+  group_by(airline) %>%
+  summarise(
+    on_time = sum(on_time),
+    delayed = sum(delayed),
+    total   = sum(total),
+    delay_rate = delayed / total,
+    .groups = "drop"
+  )
+
+overall %>%
+  mutate(delay_rate = percent(delay_rate, accuracy = 0.1))
+```
+
+```{r}
+ggplot(overall, aes(x = airline, y = delay_rate, fill = airline)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = percent(delay_rate, accuracy = 0.1)), vjust = -0.4) +
+  scale_y_continuous(labels = percent, limits = c(0, 0.16)) +
+  labs(title = "Overall delay rate by airline", x = NULL, y = "Share of flights delayed") +
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+**Finding:** Overall, Alaska delays about **13.3%** of its flights and AM West about **10.9%**. Taken at face value, AM West looks better by roughly 2.4 percentage points.
+
+## 5. City-by-city comparison (percentages)
+
+```{r}
+city_compare <- by_city %>%
+  select(airline, city, delay_rate) %>%
+  pivot_wider(names_from = airline, values_from = delay_rate) %>%
+  mutate(difference = `AM WEST` - ALASKA,
+         better = if_else(ALASKA < `AM WEST`, "Alaska", "AM West"))
+
+city_compare %>%
+  mutate(across(c(ALASKA, `AM WEST`, difference), ~ percent(.x, accuracy = 0.1)))
+```
+
+```{r}
+ggplot(by_city, aes(x = city, y = delay_rate, fill = airline)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(label = percent(delay_rate, accuracy = 0.1)),
+            position = position_dodge(width = 0.9), vjust = -0.4, size = 3) +
+  scale_y_continuous(labels = percent, limits = c(0, 0.33)) +
+  labs(title = "Delay rate by city and airline",
+       x = NULL, y = "Share of flights delayed", fill = NULL) +
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+**Finding:** Alaska has the **lower delay rate in all five cities**. The gap is smallest in Phoenix and largest in San Francisco, where AM West delays about 29% of flights against Alaska's 17%. This is the reverse of the overall result.
+
+## 6. Explaining the discrepancy
+
+How can AM West be better overall but worse in every city? The answer is **flight mix** (Simpson's paradox). Delay rates differ a lot by city for both airlines: Phoenix is easy (low delays), Seattle and San Francisco are hard (high delays). The two airlines concentrate their flights in different cities.
+
+```{r}
+mix <- by_city %>%
+  group_by(airline) %>%
+  mutate(share_of_airline = total / sum(total)) %>%
+  ungroup()
+
+mix %>%
+  select(airline, city, total, share_of_airline) %>%
+  mutate(share_of_airline = percent(share_of_airline, accuracy = 0.1)) %>%
+  pivot_wider(names_from = airline, values_from = c(total, share_of_airline))
+```
+
+```{r}
+ggplot(mix, aes(x = city, y = share_of_airline, fill = airline)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Where each airline flies: share of its flights by city",
+       x = NULL, y = "Share of the airline's flights", fill = NULL) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+About **73%** of AM West's flights go to Phoenix, the city with the lowest delay rates for both airlines. About **57%** of Alaska's flights go to Seattle, where delays are much more common. So AM West's overall number is dominated by its easy Phoenix flights, while Alaska's is dragged up by Seattle. A quick check makes this concrete: if AM West had Alaska's city mix, its delay rate would be higher than Alaska's.
+
+```{r}
+am_rates <- by_city %>% filter(airline == "AM WEST") %>% select(city, delay_rate)
+ak_mix   <- mix %>% filter(airline == "ALASKA") %>% select(city, share_of_airline)
+
+reweighted <- inner_join(am_rates, ak_mix, by = "city") %>%
+  summarise(am_west_with_alaska_mix = sum(delay_rate * share_of_airline))
+
+tibble(
+  `Alaska actual` = overall$delay_rate[overall$airline == "ALASKA"],
+  `AM West actual` = overall$delay_rate[overall$airline == "AM WEST"],
+  `AM West with Alaska's city mix` = reweighted$am_west_with_alaska_mix
+) %>%
+  mutate(across(everything(), ~ percent(.x, accuracy = 0.1)))
+```
+
+## 7. Conclusions
+
+Overall, AM West is the more punctual airline with 10.9% of flights delayed compared with 13.3% for Alaska. But that picture reverses city by city: In all five cities, Alaska has the lower delay rate. The reversal comes down to flight mix. For AM West, about 73% of its flights are to Phoenix, where delays are infrequent for both carriers, and about 57% of Alaska's are to Seattle, where delays are much more common. Thus, AM West's average is pulled down by its soft Phoenix flights, and Alaska's is pulled up by Seattle. The total figure isn't a fair like-for-like measure because it compares airlines operating on different routes. The city-level comparison matters to a traveler choosing an airline for a particular route. The overall figure is not a fair like-for-like measure as it compares airlines flying different routes. For a traveler choosing between airlines on a particular route, however, the relevant comparison is at the city level, and by that measure Alaska is the more punctual airline. These results are limited to five cities and show only whether a flight was delayed, as the data do not include delay length, time of year, or weather.
+
+
+
+
+
+
+
+
