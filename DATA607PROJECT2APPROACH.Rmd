@@ -1,0 +1,38 @@
+---
+title: "DATA607Project2Approach"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+## Approach
+
+Hello Professor, This my approach for the three dataset I have choose, my first one is dataset looking at inflation on the USA, the second dataset is new york dispole incone and lastly the third dataset just a zillow home value in the USA dataset. Here are the approaches and challenges for each one
+
+
+1.USA Inflation: Tracking the 2021–2022 Inflation Spike and Cleaning Messy Monthly Data
+
+Questions: how fast did inflation rise and fall in 2021–2022, and is the annual average hiding timing, as in your post?
+
+Challenges:
+Text in number columns: "Avail. Oct. 14" and "– (*)" make R read the whole column as text. Read everything as text first, then convert. Ave column: it's in the same table as the months. If you pivot it with them, it looks like a 13th month. Split it out. October 2025 gap: don't fill it in. Explain why it's missing.
+Page changes: the site updates monthly, so the CSV may not match the page later. Say the date you copied it.
+
+2.BEA New York Income Distribution: Measuring Who Holds New York's Disposable Income, 2012–2024
+
+Questions: how is disposable income divided across households, did the shares change from 2012 to 2024, and what do taxes do to the top group's share?
+
+Challenges:
+Two header rows: the original has "ranked by personal income" and "ranked by disposable income" above the quintile columns. One CSV header can't hold both, so I put the ranking in the column names, and your pivot_longer() has to split it back out with names_pattern. Mixed row types: one row per year holds dollar ranges as text, not shares. Suppressed values: the 2023 and 2024 component shares are "........". Keep them as missing, don't zero them. 2020 sample size: BEA says the 2020 survey sample is smaller, so be careful about calling 2020 a real change. Units: shares versus percent, and nominal dollars, need clear labels.
+
+3.Zillow Home Values: Comparing New York State Home Value Growth Against the USA.
+
+Questions: how do New York State metros compare with the U.S. in home value level and growth, before and after early 2020?
+
+Challenges:
+The file is very wide, with 320 monthly columns that become about 286,000 rows after pivoting (before missing values are removed), so I print summaries instead of the whole table. Many smaller metros have blank cells for early months because Zillow didn't publish a value. I kept these as missing, counted them, and removed them from the tidy table without filling anything in. To keep small metros from skewing the results, I compare growth only where both dates have values. The U.S. row sits with the metros, and metros that span several states are labeled by one state. The values are nominal dollars, not adjusted for inflation, so growth includes general price increases and is not "real" growth. Zillow updates the file monthly, so I note the download date.
+
+
+```{r}
+
+```
+
