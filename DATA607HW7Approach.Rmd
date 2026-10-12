@@ -1,0 +1,20 @@
+---
+title: "DATA607HW7Approach"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+
+```
+
+## Approach
+
+For this assignment, I focused on YouTube. I picked three books: YouTube: Online Video and Participatory Culture by Jean Burgess and Joshua Green, YouTubers by Chris Stokel-Walker, and Like, Comment, Subscribe by Mark Bergen. The Burgess and Green book meets the multiple author requirement. For each book, I took down the title, authors, year published, and publisher. However, before writing either file, I had decided on a schema with the same four fields in the same order. I kept the authors as a single comma-separated string in both formats to make the comparison fair.  I then hand-wrote books.html as a table with a header row and one row per book, and books.json as an array of three objects with matching keys. I loaded the HTML with rvest (read_html(), html_element(), and html_table()) and the JSON with jsonlite::fromJSON() in R and converted both to simple data frames. I compared them using identical(), all.equal() and waldo::compare(). [Select one: “The two data frames were the same.” Initially the two data frames were not identical because ____ and after I ____ them they were identical.”]
+
+## Challenges
+
+The major problem was representing multiple authors. By default, they are stored as an array in JSON, which fromJSON() converts into a list column. An HTML table cell contains a single string, so the two frames would not match. This is what I avoided by using a comma-separated string in both files (and if I used an array, I would collapse with paste(collapse = ", ") ). Challenge #2: Data Types. html_table() guesses column types, so year might load as a different type than in the JSON, and identical() considers integer and character values different even if they look the same.  Another related issue is that html_table() returns a tibble.
+In contrast, fromJSON() returns a data frame, so I converted both with as.data.frame(). I also had to keep column order and header text consistent across the files, save both as UTF-8, and follow strict JSON syntax (no trailing comma, only double quotes), which I checked with jsonlite::validate(). Finally, the titles include commas and a colon, which are harmless in HTML and JSON but would cause trouble in CSV. This showed me one reason structured formats like these are useful for text-heavy data.
+
