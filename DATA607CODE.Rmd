@@ -1,0 +1,88 @@
+---
+title: "DATA607HW7CODE"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Approach
+
+For this assignment, I focused on YouTube. I picked three books: YouTube: Online Video and Participatory Culture by Jean Burgess and Joshua Green, YouTubers by Chris Stokel-Walker, and Like, Comment, Subscribe by Mark Bergen. The Burgess and Green book meets the multiple author requirement. For each book, I took down the title, authors, year published, and publisher. However, before writing either file, I had decided on a schema with the same four fields in the same order. I kept the authors as a single comma-separated string in both formats to make the comparison fair.  I then hand-wrote books.html as a table with a header row and one row per book, and books.json as an array of three objects with matching keys. I loaded the HTML with rvest (read_html(), html_element(), and html_table()) and the JSON with jsonlite::fromJSON() in R and converted both to simple data frames. I compared them using identical(), all.equal() and waldo::compare(). [Select one: “The two data frames were the same.” Initially the two data frames were not identical because ____ and after I ____ them they were identical.”]
+
+## Challenges
+
+The major problem was representing multiple authors. By default, they are stored as an array in JSON, which fromJSON() converts into a list column. An HTML table cell contains a single string, so the two frames would not match. This is what I avoided by using a comma-separated string in both files (and if I used an array, I would collapse with paste(collapse = ", ") ). Challenge #2: Data Types. html_table() guesses column types, so year might load as a different type than in the JSON, and identical() considers integer and character values different even if they look the same.  Another related issue is that html_table() returns a tibble.
+In contrast, fromJSON() returns a data frame, so I converted both with as.data.frame(). I also had to keep column order and header text consistent across the files, save both as UTF-8, and follow strict JSON syntax (no trailing comma, only double quotes), which I checked with jsonlite::validate(). Finally, the titles include commas and a colon, which are harmless in HTML and JSON but would cause trouble in CSV. This showed me one reason structured formats like these are useful for text-heavy data.
+
+```{r}
+library(rvest)
+library(jsonlite)
+library(knitr)
+```
+
+## 1. Load the HTML table
+
+`html_table()` returns a tibble, so I convert it to a plain data frame with `as.data.frame()`.
+
+```{r load-html}
+html_df <- read_html("books.html", encoding = "UTF-8") |>
+  html_element("table") |>
+  html_table() |>
+  as.data.frame()
+
+kable(html_df)
+str(html_df)
+```
+
+## 2. Load the JSON
+
+I check that the JSON is valid first, since a trailing comma or a single quote would make `fromJSON()` fail.
+
+```{r load-json}
+validate(paste(readLines("books.json", warn = FALSE), collapse = "\n"))
+
+json_df <- fromJSON("books.json") |>
+  as.data.frame()
+
+kable(json_df)
+str(json_df)
+```
+
+## 3. Compare the two data frames
+
+```{r compare}
+identical(html_df, json_df)
+all.equal(html_df, json_df)
+waldo::compare(html_df, json_df)
+```
+
+If the frames differ, the usual causes are a column type mismatch (for example, `year` as integer in one and numeric or character in the other) or a different column order. The next chunk normalizes both and tries again. If the frames were already identical, it simply confirms that.
+
+```{r}
+html_norm <- html_df
+json_norm <- json_df[, names(html_df)]
+
+html_norm$year <- as.integer(html_norm$year)
+json_norm$year <- as.integer(json_norm$year)
+
+same_raw  <- identical(html_df, json_df)
+same_norm <- identical(html_norm, json_norm)
+
+same_raw
+same_norm
+```
+
+# Results
+
+```{r}
+if (same_raw) {
+  cat("The two data frames were **identical** as loaded, with no conversion beyond `as.data.frame()`.")
+} else if (same_norm) {
+  cat("The two data frames were **not identical** as loaded, but they matched after I aligned the column order and converted `year` to integer in both.")
+} else {
+  cat("The two data frames were **not identical**, even after normalizing types and column order. See the `waldo::compare()` output above for the remaining differences.")
+}
+```
+
+# Conclusion
+The decision to pick a common schema up front – same four fields in same order, authors as a single string – made the HTML and JSON versions fair to compare once loaded with rvest and jsonlite. The exercise showed me that the two formats make different assumptions about structure and data types, so being explicit about choices like these is what allows the resulting dataframes to be compared.
