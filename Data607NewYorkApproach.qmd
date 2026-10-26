@@ -1,0 +1,17 @@
+---
+title: "DATA607NewYorkApproach"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+
+```
+
+## Approach
+
+I want to use the NYT Most Popular API, specifically the viewed endpoint, to ask which newspaper sections have the most-viewed articles over a recent 30-day window. After creating a developer account and API key, I will save the key in an environment variable (via .Renviron) and read it with Sys.getenv("NYT_API_KEY") so it is never hard-coded. In R, I'll make the request with httr2, parse the JSON with jsonlite, flatten the results into a tibble with tidyverse tools, and then count articles by section.
+
+## Challenges
+Challenges likely include nested fields like media and des_facet that need unnesting or dropping, missing or empty values in some fields, and API rate limits (the free tier limits requests per minute and per day). I also need to handle authentication errors gracefully and remember that Most Popular only returns the last 1, 7, or 30 days, which limits historical comparison.
