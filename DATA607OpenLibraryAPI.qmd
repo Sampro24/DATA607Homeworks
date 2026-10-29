@@ -1,0 +1,15 @@
+---
+title: "DATA607OpenLibraryAPI"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Approach
+
+For this assignment, I used the Open Library Subjects API to ask which science fiction works have the most published editions and how that corresponds to when they were first published. I checked the API documentation and confirmed it's public and doesn't require an API key, so there are no credentials to protect. But I still identify myself with a User-Agent header as Open Library requests. I'll request the subject endpoint using the httr2 package, analyze the JSON response, and flatten the nested work records into a tidy tibble using hoist()
+
+## Challenges
+
+I expect some hiccups. Each work has its authors stored as a nested list that I need to flatten into one column. Some records don't have authors or a first year of publication, so I leave those as NA instead of dropping them. The data is also crowdsourced, so the number of editions can vary. Finally, because I only asked for 100 works, my results are a sample and not the entire catalog.
+
