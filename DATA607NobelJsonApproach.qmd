@@ -1,0 +1,25 @@
+---
+title: "DATA607NobelJsonApproach"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+
+```
+
+## The four questions:
+
+1. **Gender over time:** How has the share of female laureates changed by decade and by category?
+2. **Brain drain (join/compare):** Which countries "lost" the most laureates, meaning laureates born there but awarded while affiliated with an institution in another country, and what is each country's net gain or loss?
+3. **Age at award:** How old are laureates when they win, how does that differ by category, and has it changed over time?
+4. **Institutions:** Which institutions are affiliated with the most laureates, and in which fields?
+
+## Approach Potential Challenges
+
+I get each laureate from the paginated `/laureates` endpoint (cycling through `offset` and `limit` until I get the total in `meta$count`) and interpret the response with `jsonlite`, but keep it as a nested list. Then I walk the nesting in `purrr` and create three tidy tables at different grains: one row per laureate, one row per laureate-prize, and one row per laureate-prize-affiliation. These tables are filtered, grouped, or joined on `laureate_id` to answer each question. The raw JSON is cached locally so the document renders quickly and does not hit the API repeatedly.
+
+##  Potential Challenges
+
+ The main problem is the nesting: a laureate can win more than once, and a prize can have multiple affiliations, so flattening naively either loses data or duplicates rows. Also, the fields are inconsistent across records: organizations don't have gender or birth data, some older laureates have no affiliation, and some dates are incomplete, so I use a safe accessor that returns `NA` instead of erroring and filter out missing values per question. Place names change over time (a birthplace may have been in a country that no longer exists), so I compare the `countryNow` fields and not the historical names. Finally, institution names aren't standardized (different campuses or renamed institutes count separately), and the API is paginated and rate-friendly, so I add a short pause between requests and cache results.

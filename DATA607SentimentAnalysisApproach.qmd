@@ -1,0 +1,16 @@
+---
+title: "DATA607SentimentAnalysisApproach"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+
+```
+
+## Approach
+I first recreated the Chapter 2 example from Text Mining with R (Silge & Robinson) to get a working baseline. The book presents sentiment analysis as a tidy data operation: unnest_tokens() text into one word per row, then inner_join() sentiment scores from a lexicon. I used that workflow for the extension. I swapped out the Jane Austen novels for the State of the Union addresses in the sotu package, and I added the Jockers-Rinker lexicon, along with AFINN, Bing, and NRC. Addresses can be quite long, so I scored each one by net sentiment per 1,000 words. I then compared the four lexicons by plotting their trajectories in time, calculating their correlations, and checking how much of each corpus each lexicon covers.
+
+## Challenges
+The first challenge is setup. AFINN and NRC now download with the textdata package and require interactive license acceptance, which breaks non-interactive knitting unless the lexicons are cached first. The second is comparability. The lexicons use different scales (−5 to 5, −1 to 1, or binary positive/negative), so I standardized the raw scores to allow direct comparison. The third is domain mismatch. Lexicons were largely built from reviews and tweets, so some words may be scored incorrectly in political speech, just as “miss” is in Austen. The fourth is that unigram methods ignore negation and context, so “not secure” is scored on “secure” alone. The last is that the corpus format has changed over time, from long written messages in the 1800s to spoken addresses later. This can produce apparent trends based on style, not real changes in tone.

@@ -1,0 +1,351 @@
+---
+title: "DATA607NobelJsonCode"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## The four questions:
+
+1. **Gender over time:** How has the share of female laureates changed by decade and by category?
+2. **Brain drain (join/compare):** Which countries "lost" the most laureates, meaning laureates born there but awarded while affiliated with an institution in another country, and what is each country's net gain or loss?
+3. **Age at award:** How old are laureates when they win, how does that differ by category, and has it changed over time?
+4. **Institutions:** Which institutions are affiliated with the most laureates, and in which fields?
+
+## Approach Potential Challenges
+
+I get each laureate from the paginated `/laureates` endpoint (cycling through `offset` and `limit` until I get the total in `meta$count`) and interpret the response with `jsonlite`, but keep it as a nested list. Then I walk the nesting in `purrr` and create three tidy tables at different grains: one row per laureate, one row per laureate-prize, and one row per laureate-prize-affiliation. These tables are filtered, grouped, or joined on `laureate_id` to answer each question. The raw JSON is cached locally so the document renders quickly and does not hit the API repeatedly.
+
+##  Potential Challenges
+
+ The main problem is the nesting: a laureate can win more than once, and a prize can have multiple affiliations, so flattening naively either loses data or duplicates rows. Also, the fields are inconsistent across records: organizations don't have gender or birth data, some older laureates have no affiliation, and some dates are incomplete, so I use a safe accessor that returns `NA` instead of erroring and filter out missing values per question. Place names change over time (a birthplace may have been in a country that no longer exists), so I compare the `countryNow` fields and not the historical names. Finally, institution names aren't standardized (different campuses or renamed institutes count separately), and the API is paginated and rate-friendly, so I add a short pause between requests and cache results.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+library(jsonlite)
+library(knitr)
+
+# Safe accessor: returns NA instead of erroring when a nested field is missing
+g <- function(x, ...) pluck(x, ..., .default = NA_character_)
+```
+
+## Retrieving the JSON
+
+The API is paginated (`offset` and `limit`), and the `meta$count` field in the response tells us the total number of laureates. I loop over the pages and cache the raw result locally so re-rendering does not hit the API every time.
+
+```{r}
+base_url   <- "https://api.nobelprize.org/2.1/laureates"
+page_size  <- 100
+cache_file <- "nobel_laureates_raw.rds"
+
+if (file.exists(cache_file)) {
+  laureates <- readRDS(cache_file)
+} else {
+  # First request just to learn the total number of laureates
+  first <- fromJSON(sprintf("%s?offset=0&limit=%d", base_url, page_size),
+                    simplifyVector = FALSE)
+  total   <- as.integer(first$meta$count)
+  offsets <- seq(0, total - 1, by = page_size)
+
+  pages <- map(offsets, function(o) {
+    Sys.sleep(0.3)  # be polite to the API
+    fromJSON(sprintf("%s?offset=%d&limit=%d", base_url, o, page_size),
+             simplifyVector = FALSE)$laureates
+  })
+
+  laureates <- list_flatten(pages)
+  saveRDS(laureates, cache_file)
+}
+
+length(laureates)
+```
+
+## Tidying the JSON into data frames
+
+I build three tidy tables from the nested list:
+
+- `laureates_tbl`: one row per laureate (person or organization)
+- `prizes_tbl`: one row per laureate per prize (some people won twice)
+- `affil_tbl`: one row per laureate per prize per affiliation
+
+```{r}
+# 1. One row per laureate
+laureates_tbl <- map_dfr(laureates, function(l) tibble(
+  laureate_id       = g(l, "id"),
+  name              = coalesce(g(l, "knownName", "en"), g(l, "orgName", "en")),
+  type              = if (!is.null(l$orgName)) "organization" else "person",
+  gender            = g(l, "gender"),
+  birth_date        = g(l, "birth", "date"),
+  birth_country     = g(l, "birth", "place", "country", "en"),
+  birth_country_now = g(l, "birth", "place", "countryNow", "en")
+))
+
+# 2. One row per laureate-prize
+prizes_tbl <- map_dfr(laureates, function(l) {
+  map_dfr(l$nobelPrizes %||% list(), function(p) tibble(
+    laureate_id = g(l, "id"),
+    award_year  = as.integer(g(p, "awardYear")),
+    category    = g(p, "category", "en"),
+    portion     = g(p, "portion")
+  ))
+})
+
+# 3. One row per laureate-prize-affiliation
+affil_tbl <- map_dfr(laureates, function(l) {
+  map_dfr(l$nobelPrizes %||% list(), function(p) {
+    map_dfr(p$affiliations %||% list(), function(a) tibble(
+      laureate_id       = g(l, "id"),
+      award_year        = as.integer(g(p, "awardYear")),
+      category          = g(p, "category", "en"),
+      institution       = coalesce(g(a, "nameNow", "en"), g(a, "name", "en")),
+      affil_country     = g(a, "country", "en"),
+      affil_country_now = g(a, "countryNow", "en")
+    ))
+  })
+})
+
+# Sanity checks on the tidy tables
+tibble(table = c("laureates_tbl", "prizes_tbl", "affil_tbl"),
+       rows  = c(nrow(laureates_tbl), nrow(prizes_tbl), nrow(affil_tbl))) |>
+  kable()
+
+glimpse(laureates_tbl)
+glimpse(prizes_tbl)
+glimpse(affil_tbl)
+```
+
+Organizations (for example, the Red Cross) have no gender or birth data, so questions about people use only rows where `type == "person"`.
+
+```{r}
+people <- laureates_tbl |> filter(type == "person")
+```
+
+---
+
+## Question 1: How has the share of female laureates changed over time?
+
+**Description.** Women are a small minority of laureates historically. I join prizes to laureate gender, compute the share of female laureates per decade, and then per category.
+
+```{r}
+person_prizes <- prizes_tbl |>
+  inner_join(people, by = "laureate_id") |>
+  filter(!is.na(gender))
+
+by_decade <- person_prizes |>
+  mutate(decade = award_year %/% 10 * 10) |>
+  group_by(decade) |>
+  summarise(prizes = n(),
+            female = sum(gender == "female"),
+            pct_female = female / prizes,
+            .groups = "drop")
+
+by_category <- person_prizes |>
+  group_by(category) |>
+  summarise(prizes = n(),
+            female = sum(gender == "female"),
+            pct_female = female / prizes,
+            .groups = "drop") |>
+  arrange(desc(pct_female))
+
+by_category |>
+  mutate(pct_female = scales::percent(pct_female, accuracy = 0.1)) |>
+  kable(caption = "Female share of individual laureates, by category (all years)")
+```
+
+```{r}
+ggplot(by_decade, aes(factor(decade), pct_female)) +
+  geom_col(fill = "#3b6ea5") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Female share of Nobel laureates by decade",
+       x = "Decade", y = "Share of individual laureates") +
+  theme_minimal()
+```
+
+```{r}
+best_cat <- by_category |> slice(1)
+best_dec <- by_decade |> slice_max(pct_female, n = 1, with_ties = FALSE)
+```
+
+**Answer.** The category with the highest female share is **`r best_cat$category`** (`r scales::percent(best_cat$pct_female, accuracy = 0.1)`), and the decade with the highest female share is the **`r best_dec$decade`s** (`r scales::percent(best_dec$pct_female, accuracy = 0.1)`). The table and plot above show the full picture.
+
+---
+
+## Question 2: Which countries lost the most laureates (brain drain)?
+
+**Description.** This question requires joining three tables. For each prize won by a person, I compare the laureate's **birth country** (from `laureates_tbl`) with the **country of their first listed affiliation** at the time of the award (from `affil_tbl`). A laureate "moved" if the two differ. I use the `countryNow` fields for both so that historical names are compared on current borders. Then I compute, per country, how many laureates it lost (born there, affiliated elsewhere), how many it gained (affiliated there, born elsewhere), and the net.
+
+```{r}
+# First listed affiliation per laureate-prize
+primary_affil <- affil_tbl |>
+  filter(!is.na(affil_country_now)) |>
+  group_by(laureate_id, award_year, category) |>
+  slice(1) |>
+  ungroup()
+
+moves <- prizes_tbl |>
+  inner_join(people, by = "laureate_id") |>
+  inner_join(primary_affil, by = c("laureate_id", "award_year", "category")) |>
+  filter(!is.na(birth_country_now)) |>
+  mutate(moved = birth_country_now != affil_country_now)
+
+# Share of laureates who work in a different country than where they were born
+moves |> summarise(prizes = n(), moved = sum(moved), pct_moved = moved / prizes) |>
+  mutate(pct_moved = scales::percent(pct_moved, accuracy = 0.1)) |>
+  kable(caption = "Overall: laureates affiliated outside their birth country")
+
+lost <- moves |> filter(moved) |>
+  count(country = birth_country_now, name = "lost")
+gained <- moves |> filter(moved) |>
+  count(country = affil_country_now, name = "gained")
+born_total <- moves |>
+  count(country = birth_country_now, name = "born_total")
+
+flow <- full_join(lost, gained, by = "country") |>
+  left_join(born_total, by = "country") |>
+  replace_na(list(lost = 0, gained = 0, born_total = 0)) |>
+  mutate(net = gained - lost,
+         pct_lost = if_else(born_total > 0, lost / born_total, NA_real_))
+
+flow |>
+  arrange(desc(lost)) |>
+  slice_head(n = 10) |>
+  mutate(pct_lost = scales::percent(pct_lost, accuracy = 0.1)) |>
+  kable(caption = "Top 10 countries by laureates lost")
+```
+
+```{r}
+moves |>
+  filter(moved) |>
+  count(from = birth_country_now, to = affil_country_now, sort = TRUE, name = "laureates") |>
+  slice_head(n = 10) |>
+  kable(caption = "Top 10 migration routes (birth country to affiliation country)")
+```
+
+```{r}
+net_plot <- bind_rows(
+  slice_max(flow, net, n = 8, with_ties = FALSE),
+  slice_min(flow, net, n = 8, with_ties = FALSE)
+) |> distinct()
+
+ggplot(net_plot, aes(reorder(country, net), net, fill = net > 0)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_manual(values = c("TRUE" = "#2a7f62", "FALSE" = "#b5473a")) +
+  coord_flip() +
+  labs(title = "Net laureate gain or loss by country",
+       subtitle = "Gained = affiliated there but born elsewhere; lost = born there but affiliated elsewhere",
+       x = NULL, y = "Net laureates (gained minus lost)") +
+  theme_minimal()
+```
+
+```{r}
+top_lost <- flow |> arrange(desc(lost)) |> slice(1)
+top_net  <- flow |> arrange(desc(net)) |> slice(1)
+```
+
+**Answer.** The country that lost the most laureates is **`r top_lost$country`** (`r top_lost$lost` laureates born there but affiliated elsewhere). The biggest net winner is **`r top_net$country`** (net `r top_net$net`). The route table shows where laureates tend to go.
+
+---
+
+## Question 3: How old are laureates when they win, and is it changing?
+
+**Description.** I compute age at award as `award_year - birth_year`. I use the birth year only, so ages are approximate to within one year. I compare the distribution by category and look at the trend over time.
+
+```{r}
+ages <- prizes_tbl |>
+  inner_join(people, by = "laureate_id") |>
+  mutate(birth_year = as.integer(str_sub(birth_date, 1, 4)),
+         age = award_year - birth_year) |>
+  filter(!is.na(age), age > 0)
+
+ages |>
+  group_by(category) |>
+  summarise(n = n(),
+            median_age = median(age),
+            mean_age = round(mean(age), 1),
+            youngest = min(age),
+            oldest = max(age),
+            .groups = "drop") |>
+  arrange(median_age) |>
+  kable(caption = "Age at award by category")
+
+bind_rows(
+  ages |> slice_min(age, n = 3, with_ties = FALSE) |> mutate(which = "youngest"),
+  ages |> slice_max(age, n = 3, with_ties = FALSE) |> mutate(which = "oldest")
+) |>
+  select(which, name, category, award_year, age) |>
+  kable(caption = "Youngest and oldest recipients")
+```
+
+```{r}
+ggplot(ages, aes(reorder(category, age, median), age)) +
+  geom_boxplot(fill = "#9bb8d3") +
+  coord_flip() +
+  labs(title = "Age at award by category", x = NULL, y = "Age at award") +
+  theme_minimal()
+
+ggplot(ages, aes(award_year, age)) +
+  geom_point(alpha = 0.2, size = 0.8) +
+  geom_smooth(method = "loess", se = FALSE, color = "#b5473a") +
+  facet_wrap(~ category) +
+  labs(title = "Age at award over time", x = "Award year", y = "Age") +
+  theme_minimal()
+```
+
+```{r}
+youngest_cat <- ages |> group_by(category) |> summarise(m = median(age)) |> slice_min(m, n = 1, with_ties = FALSE)
+oldest_cat   <- ages |> group_by(category) |> summarise(m = median(age)) |> slice_max(m, n = 1, with_ties = FALSE)
+```
+
+**Answer.** The category with the youngest median winner is **`r youngest_cat$category`** (median `r youngest_cat$m`), and the oldest is **`r oldest_cat$category`** (median `r oldest_cat$m`). The faceted trend plot shows whether the age at award has been rising in each field.
+
+---
+
+## Question 4: Which institutions are linked to the most laureates?
+
+**Description.** Using the affiliation table, I count distinct laureate-prize pairs per institution (so a laureate is not double counted if an institution is listed twice for the same prize). I use `nameNow` (the institution's current name) where available, falling back to the name at the time. Then I break the top institutions down by prize category.
+
+```{r}
+inst_counts <- affil_tbl |>
+  filter(!is.na(institution)) |>
+  distinct(laureate_id, award_year, category, institution) |>
+  count(institution, name = "laureates", sort = TRUE)
+
+top_inst <- inst_counts |> slice_head(n = 10)
+kable(top_inst, caption = "Top 10 institutions by number of laureate affiliations")
+
+inst_by_cat <- affil_tbl |>
+  filter(institution %in% top_inst$institution) |>
+  distinct(laureate_id, award_year, category, institution) |>
+  count(institution, category, name = "laureates")
+```
+
+```{r}
+ggplot(inst_by_cat, aes(reorder(institution, laureates, sum), laureates, fill = category)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Top 10 institutions by laureate affiliations",
+       x = NULL, y = "Laureates", fill = "Category") +
+  theme_minimal()
+```
+
+```{r}
+top1 <- top_inst |> slice(1)
+```
+
+**Answer.** The institution with the most laureate affiliations is **`r top1$institution`** with **`r top1$laureates`** laureates. The stacked bars show which fields each top institution is strongest in.
+
+*Caveat:* institution names are used as the API gives them, so different campuses or institutes of the same organization (for example, separate University of California campuses) count as separate institutions.
+
+---
+
+## Conclusion
+
+Nested JSON from the Nobel Prize API can be flattened into tidy tables with `jsonlite` and `purrr`, and the interesting questions come from joining those tables, here birth place from the laureate record against affiliation country from the prize record.
+
+*Data source: Nobel Prize API v2.1, NobelPrize.org (Nobel Prize Outreach).*
