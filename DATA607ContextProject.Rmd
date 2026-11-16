@@ -1,0 +1,678 @@
+---
+title: "What Drives a Track's Popularity on Spotify?"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Approach
+A record label wants to know what makes a track popular: is it the artist, the genre, the era, or the track itself, and does that change over time? To answer this, I will clean and combine 2 Kaggle extracts of the Spotify catalog, explore era and genre patterns with tables and charts, and then fit a random forest with and without the artist's fame to see what the track, its genre, and its era add on their own. This analysis is fully reproducible: raw data is in data/raw/, all paths are relative, the random seed is fixed, and the session information is printed at the end of the report.
+
+## Challenges
+The first problem is that of data quality. The two files store the same fields differently (e.g., duration units, genre formats, partial release dates), one has unescaped quotes, which cause some CSV readers to silently drop rows, and genres are missing for many tracks, with about 40% still blank after combining both files, and belong to the artist rather than the track, forcing a choice between one row per genre (which inflates counts) and broad genre families (which lose detail). The second challenge is interpretation. Spotify’s popularity score rewards recent listening, and artist popularity is tightly coupled to the popularity of the artist’s own tracks (making the model, in part, circular, so I also run it without those variables and split training and test data by artist to avoid overstating accuracy). The data is observational and does not contain audio features like tempo or danceability; therefore, the model will explain little of the variation and will show association, not causation. Finally, I only have five minutes to present, so I will have to pick the few most compelling charts and results, rather than trying to show everything.
+
+## 1. Setup
+
+```{r}
+# Packages required (all on CRAN). Stop early with a clear message if any are missing.
+needed  <- c("tidyverse", "data.table", "ranger", "knitr", "scales")
+missing <- setdiff(needed, rownames(installed.packages()))
+if (length(missing) > 0) {
+  stop("Please install: install.packages(c(",
+       paste0('"', missing, '"', collapse = ", "), "))")
+}
+
+library(tidyverse)   # dplyr, ggplot2, readr, stringr, lubridate, ...
+library(ranger)      # fast random forest
+library(knitr)       # kable() tables
+library(scales)      # label formatting
+
+set.seed(607)        # fixed seed -> identical split, forest, and results every run
+
+# Consistent look for every chart
+col_main   <- "#15803D"   # green
+col_accent <- "#7E22CE"   # purple
+theme_set(theme_minimal(base_size = 12) +
+            theme(plot.title = element_text(face = "bold"),
+                  panel.grid.minor = element_blank()))
+
+dir.create("data/processed", showWarnings = FALSE, recursive = TRUE)
+```
+
+## 2. Load and clean the data
+
+The two files describe the same kind of record but are stored differently:
+
+| | `spotify_data_clean.csv` | `track_data_final.csv` |
+|---|---|---|
+| Duration | minutes (`track_duration_min`) | milliseconds (`track_duration_ms`) |
+| Genres | plain text, `N/A` when missing | Python-style list, `[]` when missing |
+| Release date | always full date | sometimes year only (`2009`) or `0000` |
+| Artist stats | whole numbers | decimals, a few blanks |
+
+```{r}
+# NOTE: spotify_data_clean.csv has a few unescaped inch marks inside quoted names
+# (e.g., "The 12" Singles"). readr silently loses those rows (8,573 of 8,582), so we
+# read both files with data.table::fread(), which keeps every row (it may print a
+# harmless warning that it repaired the quoting).
+read_raw <- function(path) {
+  as_tibble(data.table::fread(path, data.table = FALSE, encoding = "UTF-8",
+                              colClasses = list(character = "album_release_date")))
+}
+# Data source: the two files are stored in the project's GitHub repository.
+# If they are not already in data/raw/, they are downloaded there automatically
+# (the folder is created in the current working directory), so the report runs
+# from any folder with an internet connection, and offline once downloaded.
+github_raw <- "https://raw.githubusercontent.com/Sampro24/DATA607Homeworks/main/"
+data_files <- c(
+  "spotify_data_clean.csv" = paste0(github_raw, "spotify_data%20clean.csv"),  # name has a space on GitHub
+  "track_data_final.csv"   = paste0(github_raw, "track_data_final.csv")
+)
+
+dir.create("data/raw", showWarnings = FALSE, recursive = TRUE)
+for (f in names(data_files)) {
+  dest <- file.path("data/raw", f)
+  if (!file.exists(dest)) {
+    message("Downloading ", f, " from GitHub ...")
+    tryCatch(download.file(data_files[[f]], dest, mode = "wb", quiet = TRUE),
+             error = function(e) stop("Could not download ", f, " and no local copy exists in data/raw/. ",
+                                      "Check your internet connection or place the file there manually.",
+                                      call. = FALSE))
+  }
+}
+
+raw_a <- read_raw("data/raw/spotify_data_clean.csv")
+raw_b <- read_raw("data/raw/track_data_final.csv")
+stopifnot(nrow(raw_a) == 8582, nrow(raw_b) == 8778)   # fail loudly if the data changed
+
+# Turn either genre format into one clean, comma-separated string (NA if none)
+parse_genres <- function(x) {
+  x |>
+    str_remove("^\\[") |> str_remove("\\]$") |>             # list brackets
+    str_replace_all("['\"]?, ['\"]?", ", ") |>               # quotes between items
+    str_remove_all("^['\"]|['\"]$") |>                       # quotes at the ends
+    str_squish() |>
+    na_if("") |> na_if("N/A")
+}
+
+# Put both files in one common schema
+a <- raw_a |>
+  transmute(track_id, track_name, track_number, track_popularity, explicit,
+            artist_name, artist_popularity = as.numeric(artist_popularity),
+            artist_followers = as.numeric(artist_followers),
+            genres = parse_genres(artist_genres),
+            album_id, album_name, album_release_date = as.character(album_release_date),
+            album_total_tracks, album_type, duration_min = track_duration_min)
+
+b <- raw_b |>
+  transmute(track_id, track_name, track_number, track_popularity, explicit,
+            artist_name, artist_popularity = as.numeric(artist_popularity),
+            artist_followers = as.numeric(artist_followers),
+            genres = parse_genres(artist_genres),
+            album_id, album_name, album_release_date = as.character(album_release_date),
+            album_total_tracks, album_type, duration_min = track_duration_ms / 60000)
+
+# Combine: keep one row per track_id. File B is the base; any value that is
+# missing in B (e.g., genres) is filled from file A; tracks only in A are added.
+combined <- b |>
+  rows_patch(a, by = "track_id", unmatched = "ignore") |>
+  rows_insert(anti_join(a, b, by = "track_id"), by = "track_id")
+
+tracks <- combined |>
+  mutate(
+    release_year = as.integer(str_sub(album_release_date, 1, 4)),
+    explicit     = as.logical(explicit)
+  ) |>
+  filter(!is.na(artist_popularity),                 # rows with no artist info
+         !is.na(release_year), release_year >= 1900) |>  # '0000' dates
+  mutate(
+    decade = paste0(floor(release_year / 10) * 10, "s"),
+    # Broad genre family: first matching rule wins (priority order below)
+    genre_family = case_when(
+      is.na(genres)                                                       ~ "Unknown",
+      str_detect(genres, "hip hop|rap|drill|trap|grime|g-funk")           ~ "Hip hop / rap",
+      str_detect(genres, "latin|reggaeton|urbano|corrido|bachata|salsa")  ~ "Latin",
+      str_detect(genres, "country|bluegrass|americana|honky")             ~ "Country",
+      str_detect(genres, "r&b|soul|funk|disco")                           ~ "R&B / soul",
+      str_detect(genres, "edm|house|techno|trance|dubstep|electro|dance|bass") ~ "Electronic",
+      str_detect(genres, "metal")                                         ~ "Metal",
+      str_detect(genres, "rock|punk|grunge|emo|shoegaze|britpop")         ~ "Rock / punk",
+      str_detect(genres, "folk|indie|singer-songwriter")                  ~ "Folk / indie",
+      str_detect(genres, "pop")                                           ~ "Pop",
+      str_detect(genres, "soundtrack|anime|classical|medieval|christmas")  ~ "Soundtrack / classical",
+      TRUE                                                                ~ "Other"
+    ),
+    genre_family = factor(genre_family),
+    album_type   = factor(album_type)
+  )
+
+write_csv(tracks, "data/processed/tracks_clean.csv")
+```
+
+### Table 1. Data-cleaning log
+
+```{r}
+patched <- sum(is.na(b$genres) & b$track_id %in% a$track_id[!is.na(a$genres)])
+
+tibble(
+  Step = c("Rows in `spotify_data_clean.csv`",
+           "Rows in `track_data_final.csv`",
+           "Track IDs in both files",
+           "Tracks only in `track_data_final.csv`",
+           "Missing genres recovered from the other file",
+           "Rows after combining (unique `track_id`)",
+           "Dropped: no artist info or invalid release date",
+           "Final analysis rows"),
+  Count = c(nrow(raw_a), nrow(raw_b),
+            length(intersect(raw_a$track_id, raw_b$track_id)),
+            nrow(anti_join(b, a, by = "track_id")),
+            patched,
+            nrow(combined),
+            nrow(combined) - nrow(tracks),
+            nrow(tracks))
+) |>
+  mutate(Count = comma(Count)) |>
+  kable(align = c("l", "r"))
+```
+
+```{r}
+pct_unknown <- mean(tracks$genre_family == "Unknown")
+```
+
+Even after filling genres from both files, 39.5% of tracks still have no genre. Spotify often leaves genres blank for very large artists, so “Unknown” is treated as its own category rather than dropped.
+
+## 3. Explore the data
+
+### Table 2. Summary of the main numeric variables
+
+```{r}
+tracks |>
+  select(`Track popularity` = track_popularity,
+         `Artist popularity` = artist_popularity,
+         `Artist followers` = artist_followers,
+         `Duration (min)` = duration_min,
+         `Album tracks` = album_total_tracks,
+         `Release year` = release_year) |>
+  pivot_longer(everything(), names_to = "Variable") |>
+  group_by(Variable) |>
+  summarise(Mean = mean(value), Median = median(value), SD = sd(value),
+            Min = min(value), Max = max(value), .groups = "drop") |>
+  mutate(across(where(is.numeric),
+                ~ ifelse(Variable == "Release year", number(.x, accuracy = 1, big.mark = ""),
+                         number(.x, accuracy = 0.1, big.mark = ",")))) |>
+  kable(align = c("l", rep("r", 5)))
+```
+
+### Figure 1. Track popularity is spread out, with a spike at zero
+
+```{r}
+ggplot(tracks, aes(track_popularity)) +
+  geom_histogram(binwidth = 2, fill = col_main, colour = "white") +
+  labs(x = "Track popularity (0–100)", y = "Number of tracks",
+       title = "Distribution of track popularity",
+       subtitle = "Popularity is a snapshot score based on recent plays")
+```
+
+### Era: how has music changed?
+
+```{r}
+by_year <- tracks |>
+  group_by(release_year) |>
+  summarise(n = n(), avg_duration = mean(duration_min),
+            pct_explicit = mean(explicit), avg_popularity = mean(track_popularity),
+            .groups = "drop") |>
+  filter(n >= 25, release_year >= 1980)   # skip years with too few tracks
+```
+
+### Figure 2. Duration and explicit share by release year
+
+```{r}
+by_year |>
+  select(release_year, `Average track length (min)` = avg_duration,
+         `Share of explicit tracks` = pct_explicit) |>
+  pivot_longer(-release_year) |>
+  ggplot(aes(release_year, value)) +
+  geom_line(colour = col_main, linewidth = 1) +
+  geom_point(colour = col_main, size = 1.5) +
+  facet_wrap(~ name, ncol = 1, scales = "free_y") +
+  scale_y_continuous(labels = function(x) ifelse(x <= 1, percent(x, accuracy = 1), number(x, accuracy = 0.1))) +
+  labs(x = "Album release year", y = NULL,
+       title = "How tracks have changed since 1980",
+       subtitle = "Years with fewer than 25 tracks in the sample are omitted")
+```
+
+### Table 3. Era summary by decade
+
+```{r}
+tracks |>
+  group_by(Decade = decade) |>
+  summarise(Tracks = n(),
+            `Avg popularity` = mean(track_popularity),
+            `Avg length (min)` = mean(duration_min),
+            `% explicit` = 100 * mean(explicit),
+            `% singles` = 100 * mean(album_type == "single"),
+            .groups = "drop") |>
+  filter(Tracks >= 25) |>
+  mutate(across(starts_with("Avg"), ~ round(.x, 2)),
+         across(starts_with("%"), ~ round(.x, 1)),
+         Tracks = comma(Tracks)) |>
+  kable(align = c("l", rep("r", 5)))
+```
+
+### Genre: which genres are most popular?
+
+```{r}
+genre_long <- tracks |>
+  filter(!is.na(genres)) |>
+  separate_longer_delim(genres, ", ") |>
+  rename(genre = genres)
+
+genre_summary <- genre_long |>
+  group_by(genre) |>
+  summarise(Tracks = n(), Artists = n_distinct(artist_name),
+            `Avg popularity` = mean(track_popularity),
+            `% explicit` = 100 * mean(explicit),
+            `Avg length (min)` = mean(duration_min),
+            .groups = "drop") |>
+  filter(Tracks >= 30, Artists >= 5)   # avoid genres driven by one or two artists
+```
+
+### Figure 3. Top 12 genres by average track popularity
+
+```{r}
+genre_summary |>
+  slice_max(`Avg popularity`, n = 12) |>
+  ggplot(aes(`Avg popularity`, fct_reorder(genre, `Avg popularity`))) +
+  geom_col(fill = col_main, width = 0.7) +
+  geom_text(aes(label = round(`Avg popularity`, 1)), hjust = 1.2, colour = "white", size = 3.5) +
+  labs(x = "Average track popularity", y = NULL,
+       title = "Most popular genres",
+       subtitle = "Genres with at least 30 tracks and 5 different artists")
+```
+
+### Table 4. Genre profile: top 10 genres by average popularity
+
+```{r}
+genre_summary |>
+  slice_max(`Avg popularity`, n = 10) |>
+  mutate(across(c(`Avg popularity`, `% explicit`, `Avg length (min)`), ~ round(.x, 1)),
+         Tracks = comma(Tracks)) |>
+  rename(Genre = genre) |>
+  kable(align = c("l", rep("r", 5)))
+```
+
+### Figure 4. Popularity by broad genre family
+
+```{r}
+ggplot(tracks, aes(track_popularity, fct_reorder(genre_family, track_popularity, .fun = median))) +
+  geom_boxplot(fill = "#BBF7D0", colour = col_main, outlier.alpha = 0.25) +
+  labs(x = "Track popularity", y = NULL,
+       title = "Popularity by genre family",
+       subtitle = "Soundtrack, metal, and other sit lowest; most other families overlap heavily")
+```
+
+### Figure 5. Artist popularity vs. track popularity
+
+```{r}
+r_artist <- cor(tracks$artist_popularity, tracks$track_popularity)
+
+ggplot(tracks, aes(artist_popularity, track_popularity)) +
+  geom_point(alpha = 0.12, colour = col_main) +
+  geom_smooth(method = "lm", se = FALSE, colour = col_accent, linewidth = 1.2) +
+  labs(x = "Artist popularity", y = "Track popularity",
+       title = "Artist fame and track popularity move together",
+       subtitle = paste0("Correlation r = ", round(r_artist, 2)))
+```
+
+### Table 5. Hidden gems: popular tracks from small artists
+
+A scouting use case for a label: tracks with popularity of 70 or more from artists with under 100,000 followers.
+
+```{r}
+tracks |>
+  filter(track_popularity >= 70, artist_followers < 1e5) |>
+  arrange(desc(track_popularity), artist_followers) |>
+  slice_head(n = 10) |>
+  transmute(Artist = artist_name, Track = track_name,
+            Popularity = track_popularity,
+            Followers = comma(artist_followers),
+            Year = release_year) |>
+  kable(align = c("l", "l", "r", "r", "r"))
+```
+
+## 4. Model: what predicts popularity?
+
+To be honest about generalization, the data is split **by artist** (80% of artists for training, 20% held out for testing). A random split would put the same artist, with the same artist-level numbers, in both sets and make the model look better than it is.
+
+```{r}
+# Group split by artist
+artists      <- unique(tracks$artist_name)
+test_artists <- sample(artists, size = round(0.2 * length(artists)))
+
+model_data <- tracks |>
+  transmute(track_popularity,
+            release_year, genre_family, explicit = factor(explicit),
+            duration_min, album_type, album_total_tracks, track_number,
+            artist_popularity, log_followers = log10(artist_followers + 1),
+            artist_name) |>
+  drop_na()
+
+train <- model_data |> filter(!artist_name %in% test_artists) |> select(-artist_name)
+test  <- model_data |> filter( artist_name %in% test_artists) |> select(-artist_name)
+
+track_only_vars <- setdiff(names(train), c("artist_popularity", "log_followers"))
+
+fit_rf <- function(vars) {
+  ranger(track_popularity ~ ., data = train[, c("track_popularity", vars)],
+         num.trees = 300, importance = "permutation", seed = 607)
+}
+rf_full  <- fit_rf(setdiff(names(train), "track_popularity"))
+rf_track <- fit_rf(setdiff(track_only_vars, "track_popularity"))
+lm_full  <- lm(track_popularity ~ ., data = train)
+
+metrics <- function(truth, pred) {
+  tibble(RMSE = sqrt(mean((truth - pred)^2)),
+         MAE  = mean(abs(truth - pred)),
+         `R²` = 1 - sum((truth - pred)^2) / sum((truth - mean(truth))^2))
+}
+
+results <- bind_rows(
+  `Baseline: predict the training mean` = metrics(test$track_popularity, mean(train$track_popularity)),
+  `Linear regression (all variables)`   = metrics(test$track_popularity, predict(lm_full, test)),
+  `Random forest — track, genre, era only` = metrics(test$track_popularity, predict(rf_track, test)$predictions),
+  `Random forest — plus artist popularity & followers` = metrics(test$track_popularity, predict(rf_full, test)$predictions),
+  .id = "Model"
+)
+```
+
+### Table 6. Test-set performance (unseen artists)
+
+```{r}
+results |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  kable(align = c("l", "r", "r", "r"))
+```
+
+```{r}
+r2_full  <- results$`R²`[results$Model == "Random forest — plus artist popularity & followers"]
+r2_track <- results$`R²`[results$Model == "Random forest — track, genre, era only"]
+```
+
+### Figure 6. What matters most? Variable importance with and without the artist
+
+```{r}
+imp <- bind_rows(
+  enframe(rf_full$variable.importance,  "variable", "importance") |>
+    mutate(model = "With artist popularity & followers"),
+  enframe(rf_track$variable.importance, "variable", "importance") |>
+    mutate(model = "Track, genre, and era only")
+) |>
+  mutate(variable = recode(variable,
+    artist_popularity = "Artist popularity", log_followers = "Artist followers (log)",
+    release_year = "Release year", genre_family = "Genre family",
+    duration_min = "Duration", album_type = "Album type",
+    album_total_tracks = "Tracks on album", track_number = "Track number",
+    explicit = "Explicit"))
+
+# Sort bars separately inside each panel
+imp <- imp |> mutate(var_panel = fct_reorder(paste(variable, model, sep = "___"), importance))
+
+ggplot(imp, aes(importance, var_panel)) +
+  geom_col(fill = col_main, width = 0.7) +
+  scale_y_discrete(labels = function(x) sub("___.*$", "", x)) +
+  facet_wrap(~ model, scales = "free") +
+  labs(x = "Permutation importance (increase in error when shuffled)", y = NULL,
+       title = "Which variables drive predictions?")
+```
+
+### Figure 7. Predicted vs. actual popularity (full model, unseen artists)
+
+```{r}
+test |>
+  mutate(predicted = predict(rf_full, test)$predictions) |>
+  ggplot(aes(predicted, track_popularity)) +
+  geom_point(alpha = 0.2, colour = col_main) +
+  geom_abline(slope = 1, intercept = 0, colour = col_accent, linewidth = 1) +
+  coord_equal(xlim = c(0, 100), ylim = c(0, 100)) +
+  labs(x = "Predicted popularity", y = "Actual popularity",
+       title = "Model fit on held-out artists",
+       subtitle = "Orange line = perfect prediction")
+```
+
+## 5. Additional views
+
+These charts build on the objects created above (`tracks`, `imp`, and the fitted forests).
+
+### Figure 8. Average popularity by genre family and decade
+
+```{r}
+heat <- tracks |>
+  filter(genre_family != "Unknown", decade >= "1980s") |>
+  mutate(genre_family = droplevels(genre_family)) |>        # drop the now-empty 'Unknown' level
+  group_by(genre_family, decade) |>
+  summarise(n = n(), avg_pop = mean(track_popularity), .groups = "drop") |>
+  complete(genre_family, decade, fill = list(n = 0)) |>      # keep empty combinations as grey cells
+  mutate(avg_pop = ifelse(n >= 10, avg_pop, NA))             # hide cells with too few tracks
+
+ggplot(heat, aes(decade, fct_reorder(genre_family, avg_pop, .fun = ~ mean(.x, na.rm = TRUE)),
+                 fill = avg_pop)) +
+  geom_tile(colour = "white", linewidth = 0.8) +
+  geom_text(aes(label = round(avg_pop), colour = avg_pop > 58), size = 3.4, na.rm = TRUE) +
+  scale_colour_manual(values = c(`TRUE` = "white", `FALSE` = "grey15"), guide = "none") +
+  scale_fill_gradient(low = "#DCFCE7", high = "#166534", na.value = "grey92",
+                      name = "Avg\npopularity") +
+  labs(x = NULL, y = NULL,
+       title = "Where and when popularity is highest",
+       subtitle = "Grey cells have fewer than 10 tracks; 'Unknown' genre excluded")
+```
+
+### Figure 9. Variable importance with vs. without the artist (share of total)
+
+Importance is shown as each variable's share of that model's total, so the two models can be compared on one scale.
+
+```{r}
+dumb <- imp |>
+  group_by(model) |>
+  mutate(share = importance / sum(importance)) |>
+  ungroup() |>
+  mutate(model = factor(model, levels = c("With artist popularity & followers",
+                                          "Track, genre, and era only")))
+
+var_order <- dumb |> filter(model == levels(model)[1]) |> arrange(share) |> pull(variable)
+dumb <- dumb |> mutate(variable = factor(variable, levels = var_order))
+
+ggplot(dumb, aes(share, variable)) +
+  geom_path(aes(group = variable), colour = "grey70", linewidth = 1.2) +
+  geom_point(aes(colour = model), size = 3.5) +
+  scale_x_continuous(labels = percent_format(accuracy = 1)) +
+  scale_colour_manual(values = c(col_main, col_accent), name = NULL) +
+  labs(x = "Share of total importance", y = NULL,
+       title = "What each variable gains when the artist is removed",
+       subtitle = "Artist variables exist only in the green model") +
+  theme(legend.position = "top")
+```
+
+### Figure 10. Album type by decade
+
+```{r}
+tracks |>
+  group_by(decade) |>
+  filter(n() >= 25) |>
+  ungroup() |>
+  count(decade, album_type) |>
+  ggplot(aes(decade, n, fill = album_type)) +
+  geom_col(position = "fill", colour = "white", linewidth = 0.6, width = 0.8) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c(album = col_main, single = col_accent, compilation = "#A0AEC0"),
+                    name = NULL) +
+  labs(x = NULL, y = "Share of tracks",
+       title = "The rise of the single",
+       subtitle = "Share of tracks by release type") +
+  theme(legend.position = "top")
+```
+
+### Figure 11. Partial dependence: how predicted popularity changes with year and length
+
+A partial dependence curve shows the model's average prediction as one variable is varied while all others keep their observed values. A random sample of 400 training tracks is used to keep it fast.
+
+```{r}
+set.seed(607)
+pdp_sample <- train |> slice_sample(n = 400)
+
+pdp_curve <- function(model, var, grid, label) {
+  tibble(value = grid,
+         pred  = map_dbl(grid, function(g) {
+           d <- pdp_sample
+           d[[var]] <- g
+           mean(predict(model, d)$predictions)
+         }),
+         variable = var, model = label)
+}
+
+pdp <- bind_rows(
+  pdp_curve(rf_full,  "release_year", seq(1985, 2025, by = 5), "With artist popularity & followers"),
+  pdp_curve(rf_track, "release_year", seq(1985, 2025, by = 5), "Track, genre, and era only"),
+  pdp_curve(rf_full,  "duration_min", seq(2, 6, by = 0.5),     "With artist popularity & followers"),
+  pdp_curve(rf_track, "duration_min", seq(2, 6, by = 0.5),     "Track, genre, and era only")
+)
+
+pdp <- pdp |> mutate(model = factor(model, levels = c("With artist popularity & followers",
+                                                      "Track, genre, and era only")))
+
+ggplot(pdp, aes(value, pred, colour = model)) +
+  geom_line(linewidth = 1.1) +
+  facet_wrap(~ variable, scales = "free_x",
+             labeller = as_labeller(c(release_year = "Release year",
+                                      duration_min = "Track duration (min)"))) +
+  scale_colour_manual(values = c(col_main, col_accent), name = NULL) +
+  labs(x = NULL, y = "Average predicted popularity",
+       title = "Shape of the year and length effects",
+       subtitle = "Y-axis is zoomed to the range of predictions; the upturn at 2025 rests on few tracks") +
+  theme(legend.position = "top")
+```
+
+### Figure 12. Genre bubble chart: length, popularity, size, and explicit share
+
+```{r}
+bub <- genre_summary |> filter(Tracks >= 50, Artists >= 8)
+
+ggplot(bub, aes(`Avg length (min)`, `Avg popularity`)) +
+  geom_point(aes(size = Tracks, fill = `% explicit`), shape = 21, colour = "white",
+             stroke = 0.8, alpha = 0.9) +
+  geom_text(data = slice_max(bub, `Avg popularity`, n = 8), aes(label = genre),
+            size = 3, vjust = -1.5, check_overlap = TRUE) +
+  scale_size_area(max_size = 12, labels = comma,
+                  guide = guide_legend(override.aes = list(fill = "grey60"))) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.12))) +
+  scale_fill_gradient(low = "#DCFCE7", high = "#166534", name = "% explicit") +
+  labs(x = "Average track length (min)", y = "Average popularity",
+       title = "Genres on four dimensions",
+       subtitle = "Genres with at least 50 tracks and 8 artists; top 8 by popularity labelled")
+```
+
+### Figure 13. Popularity distribution by decade
+
+```{r}
+tracks |>
+  filter(decade >= "1980s") |>
+  ggplot(aes(decade, track_popularity)) +
+  geom_violin(fill = "#BBF7D0", colour = col_main, scale = "width") +
+  stat_summary(fun = median, geom = "point", colour = col_accent, size = 2.8) +
+  labs(x = NULL, y = "Track popularity",
+       title = "Shape of the popularity distribution by decade",
+       subtitle = "Orange dot = median")
+```
+
+### Figure 14. Artist vs. track popularity, with overplotting handled
+
+```{r}
+ggplot(tracks, aes(artist_popularity, track_popularity)) +
+  geom_bin_2d(bins = 35) +
+  scale_fill_gradient(low = "#DCFCE7", high = "#166534", name = "Tracks") +
+  labs(x = "Artist popularity", y = "Track popularity",
+       title = "Where the tracks actually concentrate",
+       subtitle = "Tracks rarely outrank their artist; the bottom row is zero-popularity tracks")
+```
+
+### Figure 15 and Table 7. Over-performers: tracks that beat the model's prediction
+
+On artists held out from training, the gap between a track's actual and predicted popularity flags tracks doing better than their artist's size and metadata would suggest. This is a more careful version of the hidden-gems idea in Table 5.
+
+```{r}
+oos <- tracks |>
+  filter(artist_name %in% test_artists) |>
+  mutate(log_followers = log10(artist_followers + 1),
+         explicit = factor(explicit, levels = c("FALSE", "TRUE"))) |>
+  drop_na(track_popularity, release_year, genre_family, explicit, duration_min,
+          album_type, album_total_tracks, track_number, artist_popularity, log_followers)
+
+oos$predicted <- predict(rf_full, oos)$predictions
+oos <- oos |> mutate(residual = track_popularity - predicted)
+
+top_over <- oos |>
+  slice_max(residual, n = 8) |>
+  mutate(rank = row_number())
+
+ggplot(oos, aes(predicted, track_popularity)) +
+  geom_point(alpha = 0.18, colour = col_main) +
+  geom_abline(slope = 1, intercept = 0, colour = "grey40") +
+  geom_point(data = top_over, colour = col_accent, size = 2.8) +
+  geom_text(data = top_over, aes(label = rank), hjust = -0.9, size = 3.4, fontface = "bold",
+            colour = "grey15") +
+  coord_equal(xlim = c(0, 100), ylim = c(0, 100)) +
+  labs(x = "Predicted popularity", y = "Actual popularity",
+       title = "Biggest over-performers on unseen artists",
+       subtitle = "Numbered points = the 8 biggest over-performers (Table 7)")
+```
+
+```{r}
+oos |>
+  slice_max(residual, n = 10) |>
+  mutate(`#` = row_number()) |>
+  transmute(`#`, Artist = artist_name, Track = str_trunc(track_name, 40),
+            Actual = track_popularity, Predicted = round(predicted),
+            Followers = comma(artist_followers), Year = release_year) |>
+  kable(align = c("r", "l", "l", "r", "r", "r", "r"))
+```
+
+Note that these over-performers are mostly well-known songs by large artists (for example, tracks from artists with tens of millions of followers), not obscure ones. The model predicts from metadata only, so it underestimates tracks whose popularity comes from sources it cannot see. For finding small artists with outsized hits, Table 5 is the better scouting list.
+
+## 6. Takeaways
+
+```{r takeaways-values}
+pretty_names <- c(artist_popularity = "artist popularity", log_followers = "artist followers",
+                  release_year = "release year", genre_family = "genre family",
+                  duration_min = "track duration", album_type = "album type",
+                  album_total_tracks = "number of tracks on the album",
+                  track_number = "track number", explicit = "explicit flag")
+top_full  <- pretty_names[[names(which.max(rf_full$variable.importance))]]
+top_track <- pretty_names[[names(which.max(rf_track$variable.importance))]]
+r2_lm     <- results$`R²`[results$Model == "Linear regression (all variables)"]
+```
+## Conclusion
+
+For artists that the model has never seen, the full random forest explains about 27% of the variation in track popularity. Without the artist variables, it explains only about 14%. So artist reach is the single biggest piece of information we have. Artist popularity is the most important variable in the full model, followed by album size, release year, and genre. Track length, track number, and the explicit flag add very little.  Even the best model does not explain most of the variation. Metadata alone is a weak predictor of popularity, and a plain linear regression (28%) does about as well as the random forest. Era and genre are furthermore interrelated, as genre rankings vary by decade (Latin averages 29 in the 2000s, but 68 in the 2020s, while hip hop/rap drops from 67 in the 1990s to 58 in the 2020s). Singles went from a minuscule percentage of releases to almost half of the tracks in 2020. For a record label, the artist is the most important thing, and it might look for rising talent in tracks that outperform their artist’s follower count (Table 5).
+
+## Limition
+
+These findings have several caveats. Spotify’s popularity score is a snapshot, so it favors recent plays and is biased toward newer releases. Artist popularity is partially circular, as it is related to the popularity of the artist’s own tracks, which is why the model is shown with and without it. The genre information is incomplete because many tracks lack a genre, and genre labels are associated with the artist rather than the track. The data is a sample, not all of Spotify. It has no audio features such as tempo or danceability. Finally, the data is observational, so the results show association, not causation.
+
+### Next steps
+
+Add audio features (tempo, danceability), model hit vs. non-hit as a classification problem, or track popularity over time with repeated snapshots.
+
+## Citation 
+I use it to get additional graphs from section 5 that said additonal view and down
+Claude Sonnet 5.5, response to “your prompt,” Anthropic, November 12, 2026, https://claude.ai.
+
+## Reproducibility
+
+To reproduce: keep the folder structure from the README, install the packages listed in the setup chunk, and knit the file in RStudio or run `rmarkdown::render("analysis.Rmd")`.
+
+```{r session-info}
+sessionInfo()
+```
