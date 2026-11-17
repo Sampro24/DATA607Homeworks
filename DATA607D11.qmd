@@ -1,0 +1,120 @@
+---
+title: "DATA607D11"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+YouTube is one of the largest recommendation engines in the world. Its recommendations determine what people see on the Home page, in the Up Next panel next to a playing video, on Shorts, and in notifications. This report breaks the system down into three steps. First, it does a Scenario Design analysis twice, once for YouTube as an organization and once for its viewers, with a quick note on creators. Second, it reasons backward from the interface and from public sources to deduce what can be learned about the system. Third, it provides concrete ways to improve the recommendations going forward.
+
+The analysis is based on concepts from chapter 9 of the book Mining of Massive Datasets [@rajaraman_ullman]: utility matrix, long tail, content-based versus collaborative filtering, and implicit feedback. It also continues the Amazon item-to-item [@linden2003] and New York Times [@spangher2015] case studies.
+# Scenario Design
+
+Scenario Design asks three questions: Who are the target users? What are their main goals? How can the system help them to reach their goals? A recommender is positioned between at least two parties with overlapping but not identical goals, so the questions are answered separately for YouTube as an organization and for its viewers.
+
+## Scenario Design for the organization (YouTube / Google)
+
+In YouTube’s view, its target users are the viewers (signed-in and signed-out), the creators who upload content, and the advertisers who pay for viewers’ attention. YouTube’s product and revenue teams are the direct internal users of the recommender, and they judge it on how well it serves all three groups.
+
+The organization's primary goals are to keep viewers returning to watch, raise advertising and subscription revenue, and to assist creators in finding audiences, so they continue to upload. YouTube also wants to satisfy viewers rather than just occupy them, because satisfaction makes engagement sustainable in the long run. Finally, it aims to reduce harm and reputational risk by not promoting borderline or low-quality content.
+
+The recommender helps achieve these by delivering a personalized slice of a huge catalog so viewers always have something worth watching next, and by routing new uploads to audiences likely to enjoy them. YouTube has also publicly changed what the system optimizes. Clicks were supplemented with watch time, since a click does not prove anyone actually watched, and then with “valued watch time,” measured through surveys that ask viewers to rate a video from one to five stars [@youtube_blog_2021]. The history shows the organization’s goals changing from involvement to satisfaction while engagement still pays the bills.
+
+## Scenario Design for viewers
+
+The audience is quite diverse. Casual viewers passing the time, people trying to learn something specific, music listeners using YouTube as a jukebox, subscribers keeping up with favorite channels, families and children, and new or signed-out users with little or no history for the system to learn from.
+
+They want to find something relevant quickly and with minimal effort. They want to find things they would not have thought to look for. They want content that is genuinely satisfying, not just clickbait. They also want control over what they see, to ensure recommendations aren’t manipulative and to avoid repetitive or unwanted videos.
+
+The recommender achieves these goals across several surfaces. The Home feed is for open-ended browsing, and the Up Next panel keeps a session going after a video ends. Viewers can drive the feed with topic filter chips, and the Subscriptions feed covers interests they already know about. Viewers can fight back against what they are shown using feedback buttons such as “Not interested,” “Don’t recommend channel,” like, and dislike.
+
+## Scenario Design for creators (brief)
+
+Creators want their videos shown to viewers who will enjoy them, and they want to understand why a video did or did not perform. YouTube's public guidance sorts a video's performance into appeal, engagement, and satisfaction, which gives creators a useful vocabulary but not full transparency into how the system works [@youtube_help].
+
+## Where the goals conflict
+
+The organization and its viewers share a broad goal of satisfying viewing, but several tensions remain. The first is engagement versus satisfaction: a video can hold attention without leaving the viewer glad they watched it. The second is exploration versus familiarity. Showing more of what a viewer already watched is safe, while showing something new risks a miss but supports discovery and the long tail. The third is control versus simplicity, since viewers want control but too many controls add friction. The last is new versus proven content. New uploads have no watch data, which is the cold-start problem, while proven videos have plenty.
+
+# Reverse Engineering What Can Be Known
+
+## Interface observations
+
+ **[TODO: modify this line with your own findings.]** Describe the surfaces you see, such as the Home feed, the Up Next panel, the Shorts feed, and the Subscriptions page, using your own account (or a new one for a clearer comparison), and make a note of which ones feel the most customized. Next, explain the feedback controls you have at your disposal, such as "Not interested," "Don't recommend channel," "like," "dislike," "subscribe," "share," "save," the filter chips, and the choices to pause or delete watch history. Next, explain a brief experiment: watch three films about a certain subject, then go back to Home and note any changes. Next, select "Not interested" on a single recommendation, and observe if similar videos continue to show up. Lastly, describe what appears in a signed-out or private window with no history (usually popular and trending content), and state the extent to which any "why am I seeing this" information truly clarifies it. Provide screenshots and explain the implications of each observation for the system's operation.
+
+## Architecture inferred from public sources
+
+Google researchers describe YouTube's recommender as the classic two-stage design. A candidate generation stage narrows a very large video corpus to a few hundred candidates, and a ranking stage scores those candidates with a richer model [@covington2016; @zhao2019].
+```{r architecture-diagram, echo=FALSE}
+# Top-down layout with short, wrapped labels so the text stays large.
+# Increase width/height below if you want it bigger still.
+DiagrammeR::mermaid("
+graph TB
+  A[Very large<br/>video corpus] --> B[Candidate generation<br/>high recall, fast]
+  U[User signals<br/>watch history, searches,<br/>context] --> B
+  B --> C[Several hundred<br/>candidates]
+  C --> D[Ranking model<br/>predicts engagement<br/>and satisfaction]
+  U --> D
+  D --> E[Ordered list<br/>Home / Up Next]
+  E --> F[Feedback<br/>clicks, watch time, likes,<br/>Not interested, surveys]
+  F --> U
+", width = 800, height = 900)
+```
+
+The candidate generation stage frames recommendation as predicting what a user will watch next from their history. Its inputs include watch and search history embedded into vectors, along with demographic and context features. This is a learned analogue of the user-profile and item-profile matching described in Chapter 9, but with embeddings in place of hand-built feature vectors. A later paper from Google researchers describes a neural retrieval system with sampling-bias correction for YouTube [@yi2019].
+
+The ranking stage is multi-objective. It predicts several outcomes at once, such as engagement (clicks and watch time) and satisfaction (likes and ratings), using a Multi-gate Mixture-of-Experts architecture. A "shallow tower" models selection bias, because users tend to click what was ranked high simply because it was ranked high, which would otherwise create a feedback loop [@zhao2019].
+
+As for the signals themselves, YouTube's help documentation lists watch history, search history, subscriptions, likes, dislikes, "Not interested" and "Don't recommend channel" feedback, and satisfaction surveys, along with context such as country and time of day [@youtube_help; @youtube_blog_2021].
+
+## Mapping to Chapter 9 concepts
+
+The system fits naturally into the framework of Chapter 9. YouTube's utility matrix is users by videos and is almost entirely blank, and its entries are mostly implicit (whether and how long a video was watched) rather than explicit ratings. As Section 9.1.4 explains, watch time, clicks, and shares act as inferred "likes," and a missing watch is not a dislike. Surveys, likes, and dislikes add explicit ratings on top of that.
+
+The long tail of Section 9.1.2 applies directly. The catalog is vast, and recommendations are the main way most niche videos ever get found. The system uses both approaches that Chapter 9 contrasts. It is content-based in that video content, topics, and metadata feed the candidate and ranking models. It is collaborative in that it learns from similar viewers, and YouTube's help page describes comparing a viewer's habits with those of people who watch in similar ways [@youtube_help]. The embeddings of users and videos also resemble the UV-decomposition of Section 9.4, since both use low-dimensional vectors whose products estimate preference.
+
+Cold start is a problem on both sides. New videos lack behavioral data, so content features matter more for them, and new viewers lack history, so popularity and context matter more. The New York Times case study makes a similar point about fresh content [@spangher2015].
+
+## Known criticisms and limits
+
+Three limits stand out. The first is the effectiveness of user controls. A 2022 Mozilla study found that "Not interested" and "Dislike" prevented only about 11% and 12% of unwanted recommendations, respectively, in its experiment, while YouTube disputed the interpretation and said the study did not reflect how its systems work [@mozilla2022; @techcrunch2022]. The second is feedback loops: a ranker trained on its own past output can reinforce itself, and the 2019 ranking paper treats selection bias as an open problem [@zhao2019]. The third is opacity. Public descriptions are high level, and production details and weights are not published.
+
+# Recommendations for Improvement
+
+The following recommendations each state a problem, a proposal, and a way to evaluate it.
+
+## Make feedback controls visibly effective
+
+Viewers report, and the Mozilla study suggests, that negative feedback often does not change what they see, which erodes trust. YouTube could show a short confirmation of what will change after "Not interested," such as "Fewer videos about this topic," and enforce a guaranteed suppression window for the exact channel or topic, with an option to undo. The change could be evaluated with an A/B test on how often rejected topics reappear, along with surveys of perceived control.
+
+## Let viewers state their intent for the session
+
+The same viewer wants very different things at different times, such as a quick tutorial, background music, or relaxing entertainment, and watch history alone cannot say which. A lightweight, optional "mode" selector (Learn, Music, Relax, Catch up) could condition the ranker, building on the existing topic filter chips. It could be evaluated by comparing satisfaction survey scores and session-abandonment rates for mode users against matched controls.
+
+## Strengthen exploration and long-tail discovery
+
+Optimizing predicted engagement favors familiar content, which narrows what viewers see and under-serves niche creators, the long-tail argument made in Chapter 9. YouTube could reserve a small, clearly labeled exploration slot in Home that draws from high-quality but low-exposure videos, using content embeddings for cold-start items and bandit-style exploration to learn from the results. Diversity should be tracked as a metric alongside engagement. Success would show up as long-term retention and satisfaction rather than short-term watch time, and as a larger share of impressions going to tail items.
+
+## Add item-to-item "because you watched" explanations
+
+Amazon's item-to-item approach [@linden2003] gives an intuitive reason for each suggestion, while YouTube's reasons are less visible. Showing a short reason on each recommendation, such as "Because you watched X" or "Popular with viewers of Y," would help viewers understand the feed. It would also give them a precise handle for feedback, such as telling the system not to use a particular video to recommend things. This could be evaluated through click-through, satisfaction, and use of controls that exclude a video from the viewer's recommendation history.
+
+## Reduce reliance on noisy implicit signals
+
+A click or a long watch does not always mean enjoyment, a point the New York Times team also makes about clicks [@spangher2015]. YouTube could expand survey coverage with very short in-feed prompts and use a model to predict satisfaction for viewers who never answer, building on its existing valued-watchtime approach. Consistent negative signals could be weighted more heavily. Success could be measured by offline agreement between predicted and surveyed satisfaction, and by the online rate at which recommended videos are abandoned early.
+
+## Evaluate beyond accuracy
+
+Chapter 9 and the Netflix Prize story focus on RMSE-style accuracy. For YouTube, metrics should also cover diversity, novelty, serendipity, long-term satisfaction, and creator-side fairness, because a recommended that only maximizes short-term prediction accuracy can still produce a poor experience.
+
+# Conclusion
+
+YouTube's recommended is best understood as a two-stage, multi-objective system whose goals have shifted over time from clicks, to watch time, to measured satisfaction. Scenario Design shows that the organization and its viewers share a goal of satisfying viewing but differ on engagement, exploration, and control. The most promising improvements are those that give viewers legible, effective control and that deliberately balance exploration against engagement.
+
+
